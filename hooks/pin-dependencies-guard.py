@@ -58,7 +58,11 @@ tree Claude is operating in — not restricted to one directory):
     NOT treated as separators, since they are not shell operators. Heredoc
     bodies (`<<EOF ... EOF`) are treated as literal data, not sub-commands,
     so example install-command *text* embedded in a heredoc's file content
-    does not get independently evaluated as a real invocation.
+    (e.g. `cat > f.sh <<EOF`) does not get independently evaluated as a real
+    invocation — UNLESS the heredoc is being fed to a real interpreter
+    (`bash <<EOF`, `sh <<EOF`, `zsh <<EOF`, `ssh host <<EOF`, `cat <<EOF |
+    bash`, etc.), in which case the body genuinely executes as shell code and
+    is still scanned line-by-line for real install invocations.
 
 **What does NOT trigger a block:**
   - `npm install` / `npm ci` / `pnpm install` / `yarn install` with no
@@ -272,17 +276,53 @@ _SUB_CMD_SPLIT_RE = re.compile(r"[|;&\n]")
 # A heredoc opener, e.g. `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`.
 _HEREDOC_START_RE = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
 
+# Real command/script interpreters that will EXECUTE a heredoc body as code
+# rather than treat it as inert data (contrast with `cat > f.sh <<EOF`, where
+# the body is file content). If any of these appears as a whitespace-
+# delimited token on the same physical line as the heredoc opener — either
+# as the command consuming the heredoc directly (`bash <<EOF`, `ssh host
+# <<EOF`) or as the far end of a pipe on that same line (`cat <<EOF |
+# bash`) — the heredoc body is real, executable shell code and must still be
+# scanned for install invocations.
+_INTERPRETER_NAMES = {
+    "bash", "sh", "zsh", "ksh", "dash", "ssh",
+    "python", "python2", "python3",
+}
+
+
+def _line_invokes_interpreter(line: str) -> bool:
+    """True if `line` contains a shell/script interpreter as a distinct
+    command token (matched by exact basename after stripping any path
+    prefix, e.g. `/bin/bash` or `venv/bin/python3`), so a filename that
+    merely ends in these letters (e.g. `f.sh`) does not false-positive
+    match."""
+    for tok in line.split():
+        name = tok.rsplit("/", 1)[-1]
+        if name in _INTERPRETER_NAMES:
+            return True
+    return False
+
 
 def _mask_heredocs(command: str) -> str:
     """Blank out heredoc body lines (between a `<<DELIM` marker and the line
-    containing that bare DELIM) before sub-command splitting. A heredoc body
-    is literal data being redirected into a command (e.g. file content for
-    `cat > f.sh <<EOF ... EOF`), not additional shell commands — treating
-    each of its lines as an independent sub-command (as a naive `\\n` split
-    would) causes false positives when the body merely contains example
-    install-command *text*. The line with the opening marker itself (a real
-    command) is preserved; only body lines are blanked, so line offsets and
-    the overall sub-command count elsewhere in the string are unaffected."""
+    containing that bare DELIM) before sub-command splitting — UNLESS the
+    heredoc is being fed to a real interpreter (see _line_invokes_interpreter),
+    in which case the body is left intact so it still gets split into
+    sub-commands and scanned.
+
+    A heredoc body is normally literal data being redirected into a command
+    (e.g. file content for `cat > f.sh <<EOF ... EOF`), not additional shell
+    commands — treating each of its lines as an independent sub-command (as
+    a naive `\\n` split would) causes false positives when the body merely
+    contains example install-command *text*. But `bash <<EOF ... EOF` (or
+    `sh`/`zsh`/`ssh host`/a pipe into one of these, e.g. `cat <<EOF |
+    bash`) genuinely executes its body as shell code — masking it there
+    would silently hide a real, unpinned install (this was a regression:
+    the original naive `\\n` split caught this case, purely by accident,
+    before heredoc-awareness was added). The line with the opening marker
+    itself (a real command) is always preserved; only body lines are
+    conditionally blanked, so line offsets elsewhere in the string are
+    unaffected either way."""
     lines = command.split("\n")
     out = []
     i = 0
@@ -292,9 +332,10 @@ def _mask_heredocs(command: str) -> str:
         m = _HEREDOC_START_RE.search(line)
         if m:
             delim = m.group(2)
+            executed = _line_invokes_interpreter(line)
             i += 1
             while i < len(lines) and lines[i].strip() != delim:
-                out.append("")
+                out.append(lines[i] if executed else "")
                 i += 1
             if i < len(lines):
                 out.append("")  # blank the closing delimiter line too
