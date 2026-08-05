@@ -603,6 +603,128 @@ class TestRunScanDecisions:
         assert "truncated" in message
 
 
+class TestValidateScannerResponse:
+    """Round-3 finding: `result.get("verdict")` in run() used to be called
+    directly on whatever call_scanner returned, with no check that the
+    parsed JSON was even a dict. json.loads happily succeeds (no exception)
+    for `null`, a list, a bare string, or a number -- so a malformed-but-valid
+    JSON response would raise an uncaught AttributeError past run()'s
+    try/except, which wraps only the scanner *call*, not the shape of what
+    it returns. That crash propagated out of main()'s sys.exit(code), so
+    Python exited 1 regardless of mode -- which meant a malformed response in
+    warn mode actually blocked the push, violating the hook's own documented
+    invariant that warn mode never blocks (module docstring: "warn mode is
+    unaffected -- a scanner failure there still only warns").
+
+    validate_scanner_response is the single validation boundary that closes
+    this: it is exercised directly here (unit-level), and indirectly through
+    run() below (integration-level) for both mode=block and mode=warn, to
+    prove the invariant holds all the way through the CLI-facing behavior,
+    not just at the helper-function level.
+    """
+
+    validate_scanner_response = staticmethod(_mod.validate_scanner_response)
+
+    def test_none_is_invalid(self):
+        assert self.validate_scanner_response(None) is None
+
+    def test_list_is_invalid(self):
+        assert self.validate_scanner_response(["block", "allow"]) is None
+
+    def test_bare_string_is_invalid(self):
+        assert self.validate_scanner_response("block") is None
+
+    def test_number_is_invalid(self):
+        assert self.validate_scanner_response(42) is None
+
+    def test_empty_dict_is_invalid(self):
+        assert self.validate_scanner_response({}) is None
+
+    def test_dict_with_block_verdict_but_non_list_findings_is_invalid(self):
+        assert self.validate_scanner_response({"verdict": "block", "findings": "not-a-list"}) is None
+
+    def test_dict_with_block_verdict_and_non_dict_finding_entry_is_invalid(self):
+        assert self.validate_scanner_response({"verdict": "block", "findings": ["not-a-dict"]}) is None
+
+    def test_valid_allow_response_is_accepted(self):
+        assert self.validate_scanner_response({"verdict": "allow", "findings": []}) == ("allow", [])
+
+    def test_valid_block_response_is_accepted(self):
+        finding = {"file": "f", "line": 1, "category": "c", "snippet": "s", "reason": "r"}
+        assert self.validate_scanner_response({"verdict": "block", "findings": [finding]}) == ("block", [finding])
+
+
+class TestRunHandlesMalformedScannerResponse:
+    """Integration-level coverage of the same round-3 gap: for each malformed
+    shape, run() must neither crash nor leak a raw traceback, and must honor
+    the same fail-closed-in-block / warn-in-warn invariant as every other
+    scanner-failure path (missing API key, raised exception, bad verdict
+    string)."""
+
+    def _push_a_change(self, git_repo):
+        (git_repo / "a.txt").write_text("v1\n")
+        _run_git(["add", "-A"], git_repo)
+        _run_git(["commit", "-q", "-m", "c1"], git_repo)
+        remote_sha = _git_rev(git_repo)
+        (git_repo / "a.txt").write_text("v2 with content\n")
+        _run_git(["add", "-A"], git_repo)
+        _run_git(["commit", "-q", "-m", "c2"], git_repo)
+        local_sha = _git_rev(git_repo)
+        return remote_sha, local_sha
+
+    @pytest.mark.parametrize("malformed_response", [
+        None,
+        ["block"],
+        "block",
+        42,
+        {},
+        {"verdict": "block", "findings": "not-a-list"},
+        {"verdict": "block", "findings": [{"file": "f"}, "not-a-dict"]},
+    ], ids=[
+        "none", "list", "bare-string", "number", "empty-dict",
+        "findings-not-a-list", "findings-with-non-dict-entry",
+    ])
+    def test_block_mode_blocks_without_crashing(self, git_repo, malformed_response):
+        remote_sha, local_sha = self._push_a_change(git_repo)
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        code, message = run(
+            stdin,
+            {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"},
+            str(git_repo),
+            call_scanner_fn=lambda prompt, key: malformed_response,
+        )
+        assert code == 1
+        assert "BLOCKED" in message
+        assert "failing closed" in message
+
+    @pytest.mark.parametrize("malformed_response", [
+        None,
+        ["block"],
+        "block",
+        42,
+        {},
+        {"verdict": "block", "findings": "not-a-list"},
+        {"verdict": "block", "findings": [{"file": "f"}, "not-a-dict"]},
+    ], ids=[
+        "none", "list", "bare-string", "number", "empty-dict",
+        "findings-not-a-list", "findings-with-non-dict-entry",
+    ])
+    def test_warn_mode_does_not_block(self, git_repo, malformed_response):
+        # This is the specific invariant round 3 found broken: a non-dict
+        # (or otherwise malformed) scanner response in warn mode must still
+        # exit 0 -- it must NOT block the push.
+        remote_sha, local_sha = self._push_a_change(git_repo)
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        code, message = run(
+            stdin,
+            {_ENV_MODE: "warn", "ANTHROPIC_API_KEY": "sk-test-fake"},
+            str(git_repo),
+            call_scanner_fn=lambda prompt, key: malformed_response,
+        )
+        assert code == 0
+        assert "WARNING" in message
+
+
 class TestScannerModel:
     def test_scanner_uses_fable_5(self):
         # Regression guard for the model swap: this hook previously ran on

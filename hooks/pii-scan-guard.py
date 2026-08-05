@@ -471,6 +471,43 @@ def format_findings_message(findings: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def validate_scanner_response(result: object) -> tuple[str, list[dict]] | None:
+    """The single validation boundary for the scanner's parsed response.
+
+    `call_scanner` only guarantees the response is valid JSON -- it says
+    nothing about its *shape*. `json.loads` happily returns `None`, a list, a
+    bare string, or a number for plenty of valid JSON documents, and none of
+    those support `.get()`/key lookups the way a dict does. Every place in
+    this module that used to reach into `result` directly (a `.get("verdict")`
+    call, a `.get("findings", [])` call) now goes through this function
+    instead, so there is exactly one place that assumes anything about the
+    scanner's structure rather than several scattered defensive checks that
+    each only cover the one shape a previous reviewer happened to try.
+
+    Returns `(verdict, findings)` if and only if `result` is a dict with a
+    `"verdict"` of `"block"` or `"allow"`, and -- for a `"block"` verdict --
+    `"findings"` is a list whose entries are themselves dicts (so
+    `format_findings_message`'s `.get()` calls on each entry are safe).
+    Returns `None` for absolutely any other shape: not a dict at all, a dict
+    missing "verdict", a dict with an unrecognized verdict string, a
+    "findings" value that isn't a list, or a "findings" list containing a
+    non-dict entry (e.g. a string or number where a finding object should
+    be). Callers MUST treat `None` exactly like a raised exception from
+    `call_scanner` -- a scanner failure that fails closed in block mode and
+    only warns in warn mode (see `_scanner_unavailable_result`)."""
+    if not isinstance(result, dict):
+        return None
+    verdict = result.get("verdict")
+    if verdict not in ("block", "allow"):
+        return None
+    if verdict == "allow":
+        return "allow", []
+    findings = result.get("findings", [])
+    if not isinstance(findings, list) or not all(isinstance(f, dict) for f in findings):
+        return None
+    return "block", findings
+
+
 def _scanner_unavailable_result(mode: str, reason: str) -> tuple[int, str]:
     """Decide the outcome when the scanner itself could not produce a
     verdict at all -- no API key, a network error, a timeout, a malformed
@@ -564,20 +601,22 @@ def run(
         except Exception as exc:  # noqa: BLE001 - any scanner failure fails closed
             return _scanner_unavailable_result(mode, f"scanner call failed ({exc})")
 
-        verdict = result.get("verdict")
-        if verdict not in ("block", "allow"):
-            # A response that parses as JSON but carries neither expected
-            # verdict string is just as much "the scanner did not produce a
-            # usable answer" as a raised exception -- treating it as "allow"
-            # here would silently defeat fail-closed for this one failure
-            # mode. Route it through the same _scanner_unavailable_result
+        validated = validate_scanner_response(result)
+        if validated is None:
+            # Anything that fails validate_scanner_response -- not a dict at
+            # all, an unrecognized verdict, or a findings list/entries with
+            # the wrong shape -- is just as much "the scanner did not produce
+            # a usable answer" as a raised exception. Treating any of these
+            # as "allow" would silently defeat fail-closed for that failure
+            # mode, so route through the same _scanner_unavailable_result
             # path (fails closed in block mode, warns in warn mode).
             return _scanner_unavailable_result(
-                mode, f"scanner returned an unexpected verdict ({verdict!r})"
+                mode, f"scanner returned an invalid response ({result!r})"
             )
+        verdict, findings = validated
 
         if verdict == "block":
-            all_findings.extend(result.get("findings", []))
+            all_findings.extend(findings)
 
     if not scanned_anything:
         return 0, ""
