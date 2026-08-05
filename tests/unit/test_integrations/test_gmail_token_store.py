@@ -438,3 +438,72 @@ class TestTokenIsolation:
         # Loading from gmail dir must return None (not the gcal token)
         result = ts._load_token_local("99", gmail_dir)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Identity metadata (issue #2153) -- email captured at grant time survives
+# save/load and is preserved across a refresh.
+# ---------------------------------------------------------------------------
+
+
+class TestEmailIdentityMetadata:
+    def test_roundtrip_preserves_email(self, tmp_path):
+        token = TokenData(
+            access_token="tok",
+            expires_at=_FUTURE,
+            scope="https://mail.google.com/",
+            refresh_token="refresh",
+            email="account-a@example.com",
+        )
+        ts.save_token("chat_a", token, token_dir=tmp_path)
+        loaded = ts.load_token("chat_a", token_dir=tmp_path)
+        assert loaded.email == "account-a@example.com"
+
+    def test_missing_email_key_loads_as_none(self, tmp_path):
+        """Tokens saved before this field existed must still load cleanly."""
+        (tmp_path / "legacy_user.json").write_text(
+            json.dumps(
+                {
+                    "access_token": "tok",
+                    "expires_at": _FUTURE.isoformat(),
+                    "scope": "",
+                    "refresh_token": "refresh",
+                }
+            )
+        )
+        loaded = ts.load_token("legacy_user", token_dir=tmp_path)
+        assert loaded is not None
+        assert loaded.email is None
+
+    def test_two_chat_ids_store_independent_emails(self, tmp_path):
+        """The exact scenario from the production incident: two different
+        chat_ids must each retain their OWN email, with no cross-contamination."""
+        token_a = TokenData(
+            access_token="tok-a", expires_at=_FUTURE, scope="s",
+            refresh_token="r", email="account-a@example.com",
+        )
+        token_b = TokenData(
+            access_token="tok-b", expires_at=_FUTURE, scope="s",
+            refresh_token="r", email="account-b@example.com",
+        )
+        ts.save_token("1111111111", token_a, token_dir=tmp_path)
+        ts.save_token("2222222222", token_b, token_dir=tmp_path)
+
+        assert ts.load_token("1111111111", token_dir=tmp_path).email == "account-a@example.com"
+        assert ts.load_token("2222222222", token_dir=tmp_path).email == "account-b@example.com"
+
+    def test_email_preserved_across_refresh(self, tmp_path):
+        expired = TokenData(
+            access_token="expired-tok", expires_at=_EXPIRED, scope="s",
+            refresh_token="valid-refresh", email="account-a@example.com",
+        )
+        ts.save_token("user_refresh_email", expired, token_dir=tmp_path)
+
+        refreshed_partial = TokenData(
+            access_token="refreshed-tok", expires_at=_FUTURE, scope="", refresh_token=None,
+        )
+        with patch.object(ts, "_refresh_token_via_proxy", return_value=refreshed_partial):
+            result = ts.get_valid_token("user_refresh_email", token_dir=tmp_path)
+
+        assert result.email == "account-a@example.com"
+        assert ts.load_token("user_refresh_email", token_dir=tmp_path).email == "account-a@example.com"

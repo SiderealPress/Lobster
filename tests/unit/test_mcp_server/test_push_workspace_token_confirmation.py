@@ -65,6 +65,7 @@ def client_and_dirs(tmp_path):
         patch(f"{_MODULE}._ENFORCE_WORKSPACE_SIGNED_SESSION", False),
         patch(f"{_MODULE}._seen_workspace_session_nonces", {}),
         patch(f"{_MODULE}._seen_push_confirmations", {}),
+        patch(f"{_MODULE}._fetch_authenticated_email", return_value="test-user@example.com"),
     ):
         from src.mcp.inbox_server_http import app
 
@@ -125,6 +126,48 @@ class TestPostAuthConfirmation:
         reply = _read_only_outbox_file(outbox_dir)
         assert "roadmap.gdoc" in reply["text"]
 
+    def test_identity_mismatch_warning_appears_in_confirmation_text(self, client_and_dirs):
+        """Issue #2153: reconnecting with a different Google account than
+        the one already on file must surface a warning in the SAME message
+        that confirms the connection succeeded -- not stay silent until an
+        explicit API call happens to reveal the mixup (the production
+        incident this issue fixes)."""
+        import src.mcp.inbox_server_http as mod
+
+        client, _, outbox_dir = client_and_dirs
+
+        with (
+            patch(f"{_MODULE}._fetch_authenticated_email", return_value="account-a@example.com"),
+            patch(f"{_MODULE}._fetch_workspace_preview", return_value=None),
+        ):
+            client.post(
+                "/api/push-workspace-token",
+                json=_VALID_BODY,
+                headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+            )
+
+        # Clear outbox + de-dupe state so the second push's confirmation is
+        # actually queued rather than skipped as a duplicate within the
+        # 5-minute TTL (_CONFIRM_DEDUPE_TTL_SECONDS).
+        for f in outbox_dir.glob("*.json"):
+            f.unlink()
+        mod._seen_push_confirmations.clear()
+
+        with (
+            patch(f"{_MODULE}._fetch_authenticated_email", return_value="account-b@example.com"),
+            patch(f"{_MODULE}._fetch_workspace_preview", return_value=None),
+        ):
+            resp = client.post(
+                "/api/push-workspace-token",
+                json=_VALID_BODY,
+                headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+            )
+
+        assert resp.status_code == 200
+        reply = _read_only_outbox_file(outbox_dir)
+        assert "account-a@example.com" in reply["text"]
+        assert "account-b@example.com" in reply["text"]
+
     def test_confirmation_degrades_gracefully_when_preview_fetch_fails(self, client_and_dirs, caplog):
         """BIS-744: a live-data fetch failure must never silence the confirmation."""
         import logging
@@ -164,6 +207,7 @@ class TestPostAuthConfirmation:
             patch(f"{_MODULE}._ENFORCE_WORKSPACE_SIGNED_SESSION", False),
             patch(f"{_MODULE}._seen_workspace_session_nonces", {}),
             patch(f"{_MODULE}._seen_push_confirmations", {}),
+            patch(f"{_MODULE}._fetch_authenticated_email", return_value="test-user@example.com"),
             patch(f"{_MODULE}._fetch_workspace_preview", return_value="preview"),
         ):
             from src.mcp.inbox_server_http import app
@@ -204,6 +248,7 @@ class TestPostAuthConfirmation:
             patch(f"{_MODULE}._ENFORCE_WORKSPACE_SIGNED_SESSION", False),
             patch(f"{_MODULE}._seen_workspace_session_nonces", {}),
             patch(f"{_MODULE}._seen_push_confirmations", {}),
+            patch(f"{_MODULE}._fetch_authenticated_email", return_value="test-user@example.com"),
             patch(f"{_MODULE}._fetch_workspace_preview", return_value="preview"),
         ):
             import logging as _logging

@@ -22,7 +22,8 @@ Token schema on disk (unchanged from the three predecessors)::
         "access_token":  "<string>",
         "expires_at":    "<ISO 8601 UTC>",
         "scope":         "<space-separated scopes>",
-        "refresh_token": "<string or null>"
+        "refresh_token": "<string or null>",
+        "email":         "<string or null -- authenticated account, issue #2153>"
     }
 
 Design principles
@@ -90,6 +91,7 @@ def _token_to_dict(token: TokenData) -> dict:
         "expires_at": token.expires_at.isoformat(),
         "scope": token.scope,
         "refresh_token": token.refresh_token,
+        "email": token.email,
     }
 
 
@@ -103,6 +105,7 @@ def _dict_to_token(data: dict) -> TokenData:
         expires_at=expires_at,
         scope=data.get("scope", ""),
         refresh_token=data.get("refresh_token"),
+        email=data.get("email"),
     )
 
 

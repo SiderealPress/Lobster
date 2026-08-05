@@ -113,6 +113,9 @@ def client_and_token_dir(tmp_path):
         patch(f"{_MODULE}._SESSION_HMAC_SECRET", _SESSION_HMAC_SECRET),
         patch(f"{_MODULE}._ENFORCE_GMAIL_SIGNED_SESSION", False),
         patch(f"{_MODULE}._seen_gmail_session_nonces", {}),
+        # Issue #2153: identity capture makes a real Google userinfo call by
+        # default -- patched out here so tests never touch the network.
+        patch(f"{_MODULE}._fetch_authenticated_email", return_value="test-user@example.com"),
     ):
         from src.mcp.inbox_server_http import app
 

@@ -68,6 +68,7 @@ def client_and_dirs(tmp_path):
         patch(f"{_MODULE}._ENFORCE_GMAIL_SIGNED_SESSION", False),
         patch(f"{_MODULE}._seen_gmail_session_nonces", {}),
         patch(f"{_MODULE}._seen_push_confirmations", {}),
+        patch(f"{_MODULE}._fetch_authenticated_email", return_value="test-user@example.com"),
     ):
         from src.mcp.inbox_server_http import app
 
@@ -161,6 +162,7 @@ class TestPostAuthConfirmation:
             patch(f"{_MODULE}._ENFORCE_GMAIL_SIGNED_SESSION", False),
             patch(f"{_MODULE}._seen_gmail_session_nonces", {}),
             patch(f"{_MODULE}._seen_push_confirmations", {}),
+            patch(f"{_MODULE}._fetch_authenticated_email", return_value="test-user@example.com"),
             patch(f"{_MODULE}._fetch_gmail_preview", return_value="preview"),
         ):
             from src.mcp.inbox_server_http import app
@@ -192,6 +194,7 @@ class TestPostAuthConfirmation:
             patch(f"{_MODULE}._ENFORCE_GMAIL_SIGNED_SESSION", False),
             patch(f"{_MODULE}._seen_gmail_session_nonces", {}),
             patch(f"{_MODULE}._seen_push_confirmations", {}),
+            patch(f"{_MODULE}._fetch_authenticated_email", return_value="test-user@example.com"),
             patch(f"{_MODULE}._fetch_gmail_preview", return_value="preview"),
         ):
             from src.mcp.inbox_server_http import app
