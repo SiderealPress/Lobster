@@ -880,6 +880,81 @@ class TestHookOverrideBypass:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# (e5) Heredoc-masking regression: a heredoc body fed to a real interpreter
+# (bash/sh/zsh/ssh/etc.) must still be scanned, even though a heredoc body
+# used as inert file content (e.g. `cat > f.sh <<EOF`) stays exempt
+# (independent-reviewer NEEDS-WORK, round 2: `bash <<EOF\npip install
+# requests\nEOF` was silently allowed by the e3 heredoc fix above)
+# ---------------------------------------------------------------------------
+
+
+class TestHeredocInterpreterExecutionStillScanned:
+    """The e3 fix (see TestBashFalsePositivesPureFunction above) made
+    _mask_heredocs blank out every heredoc body unconditionally, to stop
+    inert example text (`cat > f.sh <<EOF\\nnpm install lodash\\nEOF`) from
+    being misread as a real command. But when the heredoc's body is piped
+    into an actual shell/interpreter instead of a file, that body *is* real,
+    executable shell code — masking it created a silent bypass. These cases
+    must be BLOCKED."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bash <<EOF\npip install requests\nEOF\n",
+            "bash <<'EOF'\npip install requests\nEOF\n",
+            "sh <<EOF\npip install requests\nEOF\n",
+            "zsh <<EOF\npip install requests\nEOF\n",
+            "ssh myhost <<EOF\npip install requests\nEOF\n",
+            "cat <<EOF | bash\npip install requests\nEOF\n",
+        ],
+    )
+    def test_interpreter_heredoc_with_real_install_blocked(self, command):
+        assert bash_introduces_unpinned_dependency(command) is not None
+
+    def test_original_inert_text_heredoc_fix_not_regressed(self):
+        """The exact case the e3 fix targeted (npm install text written as
+        file content, not executed) must remain ALLOWED."""
+        command = "cat > install.sh <<'EOF'\nnpm install lodash\nEOF\n"
+        assert bash_introduces_unpinned_dependency(command) is None
+
+    def test_interpreter_heredoc_with_pinned_install_still_allowed(self):
+        """A heredoc fed to bash whose body is a real but already-pinned
+        install must not be blocked — same rule as any other Bash command."""
+        command = "bash <<EOF\npip install requests==2.31.0\nEOF\n"
+        assert bash_introduces_unpinned_dependency(command) is None
+
+    def test_tee_heredoc_still_treated_as_inert_file_content(self):
+        """`tee` (like `cat >`) writes the heredoc body to a file rather
+        than executing it — must stay exempt."""
+        command = "tee script.sh <<EOF\nnpm install lodash\nEOF\n"
+        assert bash_introduces_unpinned_dependency(command) is None
+
+
+class TestHookHeredocInterpreterExecutionIntegration:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bash <<EOF\npip install requests\nEOF\n",
+            "sh <<EOF\npip install requests\nEOF\n",
+            "zsh <<EOF\npip install requests\nEOF\n",
+            "ssh myhost <<EOF\npip install requests\nEOF\n",
+            "cat <<EOF | bash\npip install requests\nEOF\n",
+        ],
+    )
+    def test_interpreter_heredoc_blocked_via_full_hook(self, command):
+        rc, stdout, _ = _run_hook(_bash_payload(command))
+        assert rc == 0
+        assert _is_denied(stdout)
+
+    def test_inert_heredoc_still_allowed_via_full_hook(self):
+        rc, stdout, _ = _run_hook(
+            _bash_payload("cat > install.sh <<'EOF'\nnpm install lodash\nEOF\n")
+        )
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+
 class TestHookGracefulHandling:
     @pytest.mark.parametrize("tool_name", ["Read", "Glob", "Grep", "Task", "TodoWrite"])
     def test_non_covered_tool_exits_0_no_deny(self, tool_name):
