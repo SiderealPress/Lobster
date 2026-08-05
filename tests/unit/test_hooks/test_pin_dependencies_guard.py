@@ -51,6 +51,12 @@ _is_package_json = _mod._is_package_json
 find_unpinned_range = _mod.find_unpinned_range
 bash_introduces_unpinned_dependency = _mod.bash_introduces_unpinned_dependency
 _is_override_set = _mod._is_override_set
+_strip_full_line_comments = _mod._strip_full_line_comments
+_mask_heredocs = _mod._mask_heredocs
+_strip_wrappers = _mod._strip_wrappers
+_normalize_command_name = _mod._normalize_command_name
+_normalize_python_dash_m_pip = _mod._normalize_python_dash_m_pip
+_resolve_subcommand = _mod._resolve_subcommand
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +520,287 @@ class TestHookBashIntegration:
     )
     def test_bash_allowed(self, command):
         rc, stdout, _ = _run_hook(_bash_payload(command))
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+
+# ---------------------------------------------------------------------------
+# (e2) Bash bypass-gap fixes: python -m pip, path-prefixed binaries,
+# env/command wrappers, uv run --with (independent-reviewer NEEDS-WORK #1)
+# ---------------------------------------------------------------------------
+
+
+class TestBashBypassGapsPureFunction:
+    """Every one of these is an ordinary, everyday invocation (not
+    adversarial evasion) that silently installed an unpinned package with
+    zero block before the fix — demonstrated directly by the independent
+    reviewer on PR #2151."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # python -m pip: one of the most commonly recommended ways to
+            # invoke pip at all.
+            "python -m pip install requests",
+            "python3 -m pip install requests",
+            "python3.12 -m pip install requests",
+            # path-prefixed / wrapper-prefixed binaries: the regexes only
+            # matched when npm/pip/uv sat literally at position 0.
+            "/usr/bin/pip install requests",
+            "/usr/local/bin/pip3 install requests",
+            "venv/bin/pip install requests",
+            "node_modules/.bin/npm install lodash",
+            "/usr/local/bin/npm install lodash",
+            "env pip install requests",
+            "command pip install requests",
+            "env command pip install requests",
+            "FOO=bar pip install requests",
+            "env FOO=bar pip install requests",
+            # python -m pip through a path-prefixed python binary too.
+            "/usr/bin/python3 -m pip install requests",
+            # uv run --with <pkg>: installs an ephemeral unpinned dependency.
+            "uv run --with requests python foo.py",
+            "uv run --with=requests python foo.py",
+            "uv run --with requests --with pandas python foo.py",
+            "uv run --with requests,pandas python foo.py",
+        ],
+    )
+    def test_bypass_gap_now_blocked(self, command):
+        assert bash_introduces_unpinned_dependency(command) is not None, (
+            f"expected {command!r} to be detected as an unpinned install"
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # Pinned via the same forms — must NOT be blocked.
+            "python -m pip install requests==2.31.0",
+            "python3 -m pip install requests==2.31.0",
+            "/usr/bin/pip install requests==2.31.0",
+            "venv/bin/pip install requests==2.31.0",
+            "env pip install requests==2.31.0",
+            "FOO=bar pip install requests==2.31.0",
+            "uv run --with requests==2.31.0 python foo.py",
+            "uv run python foo.py",
+            "uv run --with-requirements reqs.txt python foo.py",
+            # lockfile-respecting forms via a path prefix.
+            "/usr/local/bin/npm ci",
+            "venv/bin/pip install -r requirements.txt",
+        ],
+    )
+    def test_pinned_or_lockfile_forms_via_new_paths_not_blocked(self, command):
+        assert bash_introduces_unpinned_dependency(command) is None
+
+
+class TestNormalizationHelpers:
+    def test_normalize_command_name_strips_path_prefix(self):
+        assert _normalize_command_name("/usr/bin/pip install x") == "pip install x"
+        assert (
+            _normalize_command_name("node_modules/.bin/npm install x")
+            == "npm install x"
+        )
+
+    def test_normalize_command_name_leaves_bare_command_alone(self):
+        assert _normalize_command_name("npm install x") == "npm install x"
+
+    def test_strip_wrappers_env_and_command(self):
+        assert _strip_wrappers("env pip install x") == "pip install x"
+        assert _strip_wrappers("command pip install x") == "pip install x"
+        assert _strip_wrappers("env command pip install x") == "pip install x"
+
+    def test_strip_wrappers_leading_assignment(self):
+        assert _strip_wrappers("FOO=bar pip install x") == "pip install x"
+        assert _strip_wrappers("env FOO=bar pip install x") == "pip install x"
+
+    def test_strip_wrappers_no_wrapper_is_noop(self):
+        assert _strip_wrappers("pip install x") == "pip install x"
+
+    def test_normalize_python_dash_m_pip(self):
+        assert (
+            _normalize_python_dash_m_pip("python -m pip install x")
+            == "pip install x"
+        )
+        assert (
+            _normalize_python_dash_m_pip("python3 -m pip install x")
+            == "pip install x"
+        )
+
+    def test_normalize_python_dash_m_pip_noop_for_non_pip(self):
+        assert (
+            _normalize_python_dash_m_pip("python -m venv .venv")
+            == "python -m venv .venv"
+        )
+
+    def test_resolve_subcommand_full_pipeline(self):
+        assert (
+            _resolve_subcommand("/usr/bin/python3 -m pip install x")
+            == "pip install x"
+        )
+
+
+class TestHookBashBypassGapsIntegration:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python -m pip install requests",
+            "python3 -m pip install requests",
+            "/usr/bin/pip install requests",
+            "venv/bin/pip install requests",
+            "node_modules/.bin/npm install lodash",
+            "env pip install requests",
+            "command pip install requests",
+            "uv run --with requests python foo.py",
+        ],
+    )
+    def test_bypass_gap_blocked_via_full_hook(self, command):
+        rc, stdout, _ = _run_hook(_bash_payload(command))
+        assert rc == 0
+        assert _is_denied(stdout)
+
+
+# ---------------------------------------------------------------------------
+# (e3) Bash false-positive fixes: heredoc bodies, bare "and"/"or", local-path
+# npm installs (independent-reviewer NEEDS-WORK #2)
+# ---------------------------------------------------------------------------
+
+
+class TestBashFalsePositivesPureFunction:
+    def test_heredoc_body_containing_install_text_not_blocked(self):
+        command = "cat > install.sh <<'EOF'\nnpm install lodash\nEOF\n"
+        assert bash_introduces_unpinned_dependency(command) is None
+
+    def test_heredoc_unquoted_delimiter_not_blocked(self):
+        command = "cat > install.sh <<EOF\npip install requests\nEOF\n"
+        assert bash_introduces_unpinned_dependency(command) is None
+
+    def test_heredoc_dash_variant_not_blocked(self):
+        command = "cat > install.sh <<-EOF\nnpm install lodash\nEOF\n"
+        assert bash_introduces_unpinned_dependency(command) is None
+
+    def test_real_command_before_heredoc_still_detected(self):
+        command = "npm install lodash\ncat > f.sh <<EOF\nsome text\nEOF\n"
+        assert bash_introduces_unpinned_dependency(command) is not None
+
+    def test_real_command_after_heredoc_still_detected(self):
+        command = "cat > f.sh <<EOF\nsome text\nEOF\nnpm install lodash\n"
+        assert bash_introduces_unpinned_dependency(command) is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo hello or npm install foo",
+            "echo hello and npm install foo",
+            "echo command and control",
+        ],
+    )
+    def test_bare_and_or_words_not_treated_as_separators(self, command):
+        assert bash_introduces_unpinned_dependency(command) is None
+
+    def test_real_and_operator_still_splits(self):
+        assert (
+            bash_introduces_unpinned_dependency("echo hi && npm install lodash")
+            is not None
+        )
+
+    def test_real_or_operator_still_splits(self):
+        assert (
+            bash_introduces_unpinned_dependency("npm ci || npm install lodash")
+            is not None
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "npm install ./local-package",
+            "npm install ../sibling-package",
+            "npm install /abs/path/to/package",
+            "npm i ./local-package",
+        ],
+    )
+    def test_local_path_npm_install_not_blocked(self, command):
+        assert bash_introduces_unpinned_dependency(command) is None
+
+    def test_local_path_alongside_real_unpinned_package_still_detected(self):
+        assert (
+            bash_introduces_unpinned_dependency(
+                "npm install ./local-package lodash"
+            )
+            is not None
+        )
+
+
+class TestHookBashFalsePositivesIntegration:
+    def test_heredoc_install_text_allowed_via_full_hook(self):
+        rc, stdout, _ = _run_hook(
+            _bash_payload("cat > install.sh <<'EOF'\nnpm install lodash\nEOF\n")
+        )
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_bare_or_word_allowed_via_full_hook(self):
+        rc, stdout, _ = _run_hook(_bash_payload("echo hello or npm install foo"))
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_local_path_npm_install_allowed_via_full_hook(self):
+        rc, stdout, _ = _run_hook(_bash_payload("npm install ./local-package"))
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+
+# ---------------------------------------------------------------------------
+# (e4) Manifest false positive: prose comments merely mentioning a range
+# (independent-reviewer NEEDS-WORK #2.4)
+# ---------------------------------------------------------------------------
+
+
+class TestManifestCommentFalsePositive:
+    def test_full_line_comment_mentioning_range_not_blocked(self):
+        text = "# needs numpy>=1.20 installed separately\n"
+        assert find_unpinned_range(text, is_package_json=False) is None
+
+    def test_full_line_comment_with_leading_whitespace_not_blocked(self):
+        text = "    # needs numpy>=1.20 installed separately\n"
+        assert find_unpinned_range(text, is_package_json=False) is None
+
+    def test_comment_alongside_real_dependency_line_still_blocked(self):
+        text = (
+            "# needs numpy>=1.20 installed separately\n"
+            'dependencies = [\n    "mcp>=1.0.0",\n]\n'
+        )
+        match = find_unpinned_range(text, is_package_json=False)
+        assert match is not None
+        assert "mcp" in match
+
+    def test_inline_trailing_comment_does_not_suppress_real_match(self):
+        text = "mcp>=1.0.0  # some note\n"
+        assert find_unpinned_range(text, is_package_json=False) is not None
+
+    def test_strip_full_line_comments_helper(self):
+        text = "# numpy>=1.20\nmcp==1.26.0\n"
+        stripped = _strip_full_line_comments(text)
+        assert "numpy" not in stripped
+        assert "mcp==1.26.0" in stripped
+
+
+class TestHookManifestCommentFalsePositiveIntegration:
+    def test_edit_prose_comment_in_requirements_allowed(self):
+        rc, stdout, _ = _run_hook(
+            _edit_payload(
+                "requirements.txt",
+                "# needs numpy>=1.20 installed separately\n",
+            )
+        )
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_edit_prose_comment_in_pyproject_allowed(self):
+        rc, stdout, _ = _run_hook(
+            _edit_payload(
+                "pyproject.toml",
+                "# needs numpy>=1.20 installed separately\n",
+            )
+        )
         assert rc == 0
         assert not _is_denied(stdout)
 
