@@ -15,6 +15,11 @@ Tests cover:
   on scanner exceptions, and the actual block/allow/no-op decisions
 - Full CLI subprocess invocation for the mode gate and bypass (no network
   required for these paths)
+- Fail-open observability logging (issue #2167): every fail-open path (missing
+  API key, network error, timeout, malformed response) appends a durable
+  JSONL record with the correct reason category; logging never changes the
+  hook's exit code even if the log write itself fails; the happy path (a real
+  allow/block verdict) writes nothing
 
 Convention: pure functions are imported directly via importlib.util (as in
 test_pin_dependencies_guard.py); the orchestration core is exercised via
@@ -63,6 +68,14 @@ format_findings_message = _mod.format_findings_message
 run = _mod.run
 _MAX_DIFF_CHARS = _mod._MAX_DIFF_CHARS
 _EMPTY_TREE_SHA = _mod._EMPTY_TREE_SHA
+_classify_scanner_exception = _mod._classify_scanner_exception
+_summarize_scanner_exception_for_log = _mod._summarize_scanner_exception_for_log
+_redact_secret = _mod._redact_secret
+log_failopen_event = _mod.log_failopen_event
+_CATEGORY_MISSING_API_KEY = _mod._CATEGORY_MISSING_API_KEY
+_CATEGORY_NETWORK_ERROR = _mod._CATEGORY_NETWORK_ERROR
+_CATEGORY_TIMEOUT = _mod._CATEGORY_TIMEOUT
+_CATEGORY_MALFORMED_RESPONSE = _mod._CATEGORY_MALFORMED_RESPONSE
 
 
 # ---------------------------------------------------------------------------
@@ -938,3 +951,342 @@ class TestCliSubprocess:
     def test_empty_stdin_exits_zero(self, git_repo):
         result = _run_hook_cli("", {_ENV_MODE: "block"}, str(git_repo))
         assert result.returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# Fail-open observability logging (issue #2167)
+# ---------------------------------------------------------------------------
+#
+# PR #2156's independent reviewer flagged that every fail-open path here
+# (missing API key, network error, timeout, malformed response) degraded
+# silently: the push succeeds (in warn mode) or is blocked (in block mode)
+# with only a stderr line most workflows never durably surface. These tests
+# prove each of the four reasons documented in _scanner_unavailable_result's
+# docstring lands as a distinct, durable, greppable JSONL record -- reusing
+# this repo's existing hooks/usage-accumulator.py-style append-only JSONL
+# convention rather than a new logging mechanism -- and that a broken logging
+# call can never change the hook's actual exit code or message (instrumentation
+# must never become part of the decision path).
+
+
+class TestClassifyScannerException:
+    """`call_scanner`'s network boundary can raise anything -- a real
+    `anthropic` SDK error, a bare `TimeoutError`, a `ConnectionError`, etc.
+    `_classify_scanner_exception` maps any of those onto one of the two
+    exception-shaped fail-open categories already implied by the module's own
+    fail-closed docstring ("a network error, a timeout"), without importing
+    the anthropic SDK's specific error classes (call_scanner imports
+    anthropic lazily; classification must not force that import)."""
+
+    def test_timeout_error_classified_as_timeout(self):
+        assert _classify_scanner_exception(TimeoutError("scan timed out")) == _CATEGORY_TIMEOUT
+
+    def test_message_mentioning_timeout_classified_as_timeout(self):
+        # Some SDK errors are a generic Exception subclass whose *message*
+        # says "timeout" rather than a dedicated TimeoutError type.
+        assert _classify_scanner_exception(RuntimeError("request timeout after 180s")) == _CATEGORY_TIMEOUT
+
+    def test_connection_error_classified_as_network_error(self):
+        assert _classify_scanner_exception(ConnectionError("could not reach api.anthropic.com")) == _CATEGORY_NETWORK_ERROR
+
+    def test_generic_exception_classified_as_network_error(self):
+        assert _classify_scanner_exception(RuntimeError("500 Internal Server Error")) == _CATEGORY_NETWORK_ERROR
+
+
+class TestSummarizeScannerExceptionForLog:
+    """CodeQL flagged the original fail-open logging as a "clear-text
+    storage of sensitive information" path: the durable log persisted
+    `str(exc)` verbatim, and `exc` can be anything the anthropic SDK or a
+    lower HTTP layer chooses to raise -- including, potentially, request
+    content such as the API key used two lines earlier in
+    `call_scanner_fn(prompt, api_key)`. `_summarize_scanner_exception_for_log`
+    replaces the raw exception text with a fixed-shape "type name + HTTP
+    status" summary that structurally cannot carry that content, rather
+    than trying to scrub an open-ended string after the fact."""
+
+    def test_summary_never_contains_the_original_message_text(self):
+        exc = RuntimeError("connection refused to api.anthropic.com:443, retry exhausted")
+        summary = _summarize_scanner_exception_for_log(exc)
+        assert "connection refused" not in summary
+        assert "api.anthropic.com" not in summary
+        assert summary == "RuntimeError"
+
+    def test_summary_extracts_http_status_when_present(self):
+        exc = RuntimeError("Error code: 401 - {'type': 'error'}")
+        assert _summarize_scanner_exception_for_log(exc) == "RuntimeError (status 401)"
+
+    def test_summary_uses_exception_type_name(self):
+        assert _summarize_scanner_exception_for_log(TimeoutError("scan timed out")) == "TimeoutError"
+
+    def test_summary_never_contains_a_realistic_api_key_embedded_in_message(self):
+        # The exact scenario CodeQL's taint tracker flagged: an exception
+        # message that happens to echo request content, here a
+        # realistic-looking Anthropic API key.
+        fake_key = "sk-ant-api03-totally-fake-not-a-real-secret-1234567890abcdef"
+        exc = RuntimeError(f"request failed; sent header x-api-key: {fake_key}")
+        summary = _summarize_scanner_exception_for_log(exc)
+        assert fake_key not in summary
+
+
+class TestRedactSecret:
+    def test_removes_literal_occurrence_of_secret(self):
+        assert _redact_secret("failed with key sk-ant-abc123", "sk-ant-abc123") == "failed with key [REDACTED]"
+
+    def test_no_op_when_secret_is_none(self):
+        assert _redact_secret("some text", None) == "some text"
+
+    def test_no_op_when_secret_is_empty_string(self):
+        assert _redact_secret("some text", "") == "some text"
+
+    def test_removes_multiple_occurrences(self):
+        assert _redact_secret("k=sk-1 and again sk-1", "sk-1") == "k=[REDACTED] and again [REDACTED]"
+
+
+class TestLogFailopenEvent:
+    """Direct coverage of the logging primitive: JSONL record shape and the
+    never-raises guarantee."""
+
+    def test_appends_one_json_line_with_expected_fields(self, tmp_path):
+        log_path = tmp_path / "pii-scan-guard-failopen.jsonl"
+        log_failopen_event(
+            env={}, category=_CATEGORY_TIMEOUT, reason="scanner call failed (timed out)",
+            mode="block", log_path=log_path,
+        )
+        lines = log_path.read_text().splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["hook"] == "pii-scan-guard"
+        assert record["category"] == _CATEGORY_TIMEOUT
+        assert record["reason"] == "scanner call failed (timed out)"
+        assert record["mode"] == "block"
+        assert "ts" in record and record["ts"]
+
+    def test_appends_without_truncating_prior_entries(self, tmp_path):
+        log_path = tmp_path / "failopen.jsonl"
+        log_failopen_event(env={}, category=_CATEGORY_TIMEOUT, reason="r1", mode="block", log_path=log_path)
+        log_failopen_event(env={}, category=_CATEGORY_NETWORK_ERROR, reason="r2", mode="warn", log_path=log_path)
+        lines = log_path.read_text().splitlines()
+        assert len(lines) == 2
+        assert json.loads(lines[0])["reason"] == "r1"
+        assert json.loads(lines[1])["reason"] == "r2"
+
+    def test_creates_parent_directory_if_missing(self, tmp_path):
+        log_path = tmp_path / "nested" / "logs" / "failopen.jsonl"
+        log_failopen_event(env={}, category=_CATEGORY_MISSING_API_KEY, reason="r", mode="block", log_path=log_path)
+        assert log_path.exists()
+
+    def test_unwritable_log_path_does_not_raise(self, tmp_path):
+        # A directory where a file is expected: opening it for append must
+        # fail with OSError/IsADirectoryError. Logging is instrumentation --
+        # it must swallow this, not propagate.
+        log_path = tmp_path  # a directory, not a file path
+        log_failopen_event(env={}, category=_CATEGORY_TIMEOUT, reason="r", mode="block", log_path=log_path)
+        # No exception means the test passed.
+
+
+class TestRunLogsEachFailOpenReason:
+    """Integration-level: each fail-open path through `run()` writes exactly
+    one log record with the matching category. Mirrors the four reasons
+    named in this hook's own fail-closed docstring: missing key, network
+    error, timeout, malformed response."""
+
+    def _push_a_change(self, git_repo):
+        (git_repo / "a.txt").write_text("v1\n")
+        _run_git(["add", "-A"], git_repo)
+        _run_git(["commit", "-q", "-m", "c1"], git_repo)
+        remote_sha = _git_rev(git_repo)
+        (git_repo / "a.txt").write_text("v2 with content\n")
+        _run_git(["add", "-A"], git_repo)
+        _run_git(["commit", "-q", "-m", "c2"], git_repo)
+        local_sha = _git_rev(git_repo)
+        return remote_sha, local_sha
+
+    def _stdin_for(self, git_repo):
+        remote_sha, local_sha = self._push_a_change(git_repo)
+        return f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+
+    def _read_records(self, log_path):
+        if not log_path.exists():
+            return []
+        return [json.loads(line) for line in log_path.read_text().splitlines()]
+
+    def test_missing_api_key_logs_missing_api_key_category(self, git_repo, tmp_path, monkeypatch):
+        stdin = self._stdin_for(git_repo)
+        log_path = tmp_path / "failopen.jsonl"
+        monkeypatch.setattr(_mod, "find_config_file", lambda: None)
+        code, _msg = run(
+            stdin, {_ENV_MODE: "block", "ANTHROPIC_API_KEY": ""}, str(git_repo),
+            call_scanner_fn=_fake_scanner_returning("allow"),
+            failopen_log_path=log_path,
+        )
+        assert code == 1
+        records = self._read_records(log_path)
+        assert len(records) == 1
+        assert records[0]["category"] == _CATEGORY_MISSING_API_KEY
+        assert "ANTHROPIC_API_KEY" in records[0]["reason"]
+
+    def test_network_error_logs_network_error_category(self, git_repo, tmp_path):
+        stdin = self._stdin_for(git_repo)
+        log_path = tmp_path / "failopen.jsonl"
+        code, _msg = run(
+            stdin, {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"}, str(git_repo),
+            call_scanner_fn=_fake_scanner_raising(ConnectionError("could not reach api")),
+            failopen_log_path=log_path,
+        )
+        assert code == 1
+        records = self._read_records(log_path)
+        assert len(records) == 1
+        assert records[0]["category"] == _CATEGORY_NETWORK_ERROR
+
+    def test_timeout_logs_timeout_category(self, git_repo, tmp_path):
+        stdin = self._stdin_for(git_repo)
+        log_path = tmp_path / "failopen.jsonl"
+        code, _msg = run(
+            stdin, {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"}, str(git_repo),
+            call_scanner_fn=_fake_scanner_raising(TimeoutError("scan timed out")),
+            failopen_log_path=log_path,
+        )
+        assert code == 1
+        records = self._read_records(log_path)
+        assert len(records) == 1
+        assert records[0]["category"] == _CATEGORY_TIMEOUT
+
+    def test_exception_message_containing_api_key_is_not_logged_verbatim(self, git_repo, tmp_path):
+        # Regression test for the CodeQL "clear-text storage of sensitive
+        # information" finding: a scanner-call exception whose message
+        # happens to echo request content (here, a realistic-looking
+        # Anthropic API key) must never reach the durable log verbatim.
+        # `_summarize_scanner_exception_for_log`'s fixed-shape summary
+        # should already prevent this; this test proves the end-to-end
+        # `run()` path, not just the helper in isolation.
+        fake_key = "sk-ant-api03-totally-fake-not-a-real-secret-1234567890abcdef"
+        stdin = self._stdin_for(git_repo)
+        log_path = tmp_path / "failopen.jsonl"
+        code, message = run(
+            stdin, {_ENV_MODE: "block", "ANTHROPIC_API_KEY": fake_key}, str(git_repo),
+            call_scanner_fn=_fake_scanner_raising(
+                RuntimeError(f"connection failed; sent header x-api-key: {fake_key}")
+            ),
+            failopen_log_path=log_path,
+        )
+        assert code == 1
+        records = self._read_records(log_path)
+        assert len(records) == 1
+        assert records[0]["category"] == _CATEGORY_NETWORK_ERROR
+        # The persisted record -- serialized exactly as it was written to
+        # disk -- must not contain the key in any form.
+        assert fake_key not in json.dumps(records[0])
+        # The stderr message shown to the operator at push time is
+        # unchanged/full-detail (not part of this fix's scope -- only the
+        # durable, greppable log is restricted).
+        assert fake_key in message
+
+    def test_malformed_response_logs_malformed_response_category(self, git_repo, tmp_path):
+        stdin = self._stdin_for(git_repo)
+        log_path = tmp_path / "failopen.jsonl"
+        code, _msg = run(
+            stdin, {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"}, str(git_repo),
+            call_scanner_fn=lambda prompt, key: {"verdict": "not-a-real-verdict"},
+            failopen_log_path=log_path,
+        )
+        assert code == 1
+        records = self._read_records(log_path)
+        assert len(records) == 1
+        assert records[0]["category"] == _CATEGORY_MALFORMED_RESPONSE
+
+    def test_warn_mode_still_logs_even_though_it_does_not_block(self, git_repo, tmp_path):
+        # A scanner outage in warn mode is exactly as invisible today as one
+        # in block mode -- warn mode not blocking the push must not be
+        # conflated with warn mode not logging the outage.
+        stdin = self._stdin_for(git_repo)
+        log_path = tmp_path / "failopen.jsonl"
+        code, _msg = run(
+            stdin, {_ENV_MODE: "warn", "ANTHROPIC_API_KEY": "sk-test-fake"}, str(git_repo),
+            call_scanner_fn=_fake_scanner_raising(TimeoutError("scan timed out")),
+            failopen_log_path=log_path,
+        )
+        assert code == 0
+        records = self._read_records(log_path)
+        assert len(records) == 1
+        assert records[0]["category"] == _CATEGORY_TIMEOUT
+        assert records[0]["mode"] == "warn"
+
+    def test_successful_allow_verdict_writes_no_log_entry(self, git_repo, tmp_path):
+        stdin = self._stdin_for(git_repo)
+        log_path = tmp_path / "failopen.jsonl"
+        code, _msg = run(
+            stdin, {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"}, str(git_repo),
+            call_scanner_fn=_fake_scanner_returning("allow"),
+            failopen_log_path=log_path,
+        )
+        assert code == 0
+        assert not log_path.exists()
+
+    def test_successful_block_verdict_writes_no_log_entry(self, git_repo, tmp_path):
+        # A confident, well-formed "block" verdict is the scanner working
+        # correctly -- not a fail-open event -- and must not be logged here.
+        stdin = self._stdin_for(git_repo)
+        log_path = tmp_path / "failopen.jsonl"
+        finding = {"file": "a.txt", "line": 1, "category": "pii", "snippet": "x", "reason": "y"}
+        code, _msg = run(
+            stdin, {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"}, str(git_repo),
+            call_scanner_fn=_fake_scanner_returning("block", [finding]),
+            failopen_log_path=log_path,
+        )
+        assert code == 1
+        assert not log_path.exists()
+
+    def test_default_log_path_resolves_under_lobster_workspace(self, git_repo, tmp_path, monkeypatch):
+        # No failopen_log_path override: the hook must resolve its own
+        # durable default location under $LOBSTER_WORKSPACE/logs, mirroring
+        # hooks/usage-accumulator.py's token-usage.jsonl / hook-failures.log
+        # convention, rather than requiring every caller to supply a path.
+        # run() is a pure function of its `env` argument (not os.environ), so
+        # LOBSTER_WORKSPACE is passed through the same injected env dict as
+        # every other setting -- mirroring how ANTHROPIC_API_KEY resolution
+        # works elsewhere in this module.
+        fake_workspace = tmp_path / "fake-workspace"
+        monkeypatch.setattr(_mod, "find_config_file", lambda: None)
+        stdin = self._stdin_for(git_repo)
+        code, _msg = run(
+            stdin,
+            {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "", "LOBSTER_WORKSPACE": str(fake_workspace)},
+            str(git_repo),
+            call_scanner_fn=_fake_scanner_returning("allow"),
+        )
+        assert code == 1
+        default_log = fake_workspace / "logs" / "pii-scan-guard-failopen.jsonl"
+        assert default_log.exists()
+        record = json.loads(default_log.read_text().splitlines()[0])
+        assert record["category"] == _CATEGORY_MISSING_API_KEY
+
+
+class TestFailopenLoggingNeverBreaksOutcome:
+    """Falsifiability guard: logging is instrumentation bolted onto the
+    decision path, not part of it. If the log write itself fails (e.g. the
+    log path is a directory, not a file), the hook's exit code and message
+    must be completely unaffected."""
+
+    def _push_a_change(self, git_repo):
+        (git_repo / "a.txt").write_text("v1\n")
+        _run_git(["add", "-A"], git_repo)
+        _run_git(["commit", "-q", "-m", "c1"], git_repo)
+        remote_sha = _git_rev(git_repo)
+        (git_repo / "a.txt").write_text("v2 with content\n")
+        _run_git(["add", "-A"], git_repo)
+        _run_git(["commit", "-q", "-m", "c2"], git_repo)
+        local_sha = _git_rev(git_repo)
+        return remote_sha, local_sha
+
+    def test_unwritable_log_path_does_not_change_block_outcome(self, git_repo, tmp_path):
+        remote_sha, local_sha = self._push_a_change(git_repo)
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        broken_log_path = tmp_path  # a directory: opening it for append raises
+        code, message = run(
+            stdin, {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"}, str(git_repo),
+            call_scanner_fn=_fake_scanner_raising(TimeoutError("scan timed out")),
+            failopen_log_path=broken_log_path,
+        )
+        assert code == 1
+        assert "BLOCKED" in message
+        assert "failing closed" in message

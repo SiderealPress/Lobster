@@ -65,6 +65,25 @@ transient errors before that. `LOBSTER_PII_SCAN_SKIP=1` remains the
 deliberate, explicit escape hatch for a push the operator has already
 decided is safe.
 
+**Fail-open observability (issue #2167):** every one of the four fail-open
+reasons above (missing key, network error, timeout, malformed response) also
+appends a durable JSONL record to
+`$LOBSTER_WORKSPACE/logs/pii-scan-guard-failopen.jsonl` (see
+log_failopen_event / _scanner_unavailable_result), in both `warn` and `block`
+mode. Before this, the only trace of a scanner outage was a stderr line on
+the developer's terminal at push time -- nothing durable existed to answer
+"has this scanner been a no-op for a week?" This is instrumentation only: it
+does not add alerting or a cron job (the hook is not installed anywhere yet
+as of this writing), it just makes fail-open events visible somewhere that
+could be checked or wired into alerting later. The persisted record never
+contains the raw exception text: exception-derived reasons are logged as a
+fixed-shape "type name + HTTP status" summary
+(_summarize_scanner_exception_for_log), with a literal-value redaction
+backstop (_redact_secret) for the API key wherever it's in scope -- a
+network/timeout/malformed-response failure can otherwise raise or return
+almost anything, and nothing upstream guarantees that content excludes
+request data.
+
 **Model:** the scanner runs on Claude Fable 5 (`claude-fable-5`), not Opus.
 This hook previously ran on Opus, which was shown (see the PR/issue history)
 to be foolable by realistic-looking PII wrapped in business, consulting,
@@ -103,6 +122,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -127,6 +147,24 @@ _ZERO_SHA = "0" * 40
 _EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 _ALLOWLIST_FILENAME = ".security-allowlist"
+
+# ---------------------------------------------------------------------------
+# Fail-open observability logging (issue #2167)
+# ---------------------------------------------------------------------------
+# Every fail-open path (see _scanner_unavailable_result below) previously
+# degraded silently -- a stderr line most workflows never durably surface.
+# These four categories are exactly the four reasons already named in
+# _scanner_unavailable_result's own docstring; this does not invent a new
+# taxonomy, it just gives each of those reasons a stable machine-readable
+# label for the log. Reuses this repo's existing hook-logging convention
+# (see hooks/usage-accumulator.py's ~/lobster-workspace/logs/*.jsonl
+# append-only pattern) rather than a new mechanism.
+_CATEGORY_MISSING_API_KEY = "missing_api_key"
+_CATEGORY_NETWORK_ERROR = "network_error"
+_CATEGORY_TIMEOUT = "timeout"
+_CATEGORY_MALFORMED_RESPONSE = "malformed_response"
+
+_FAILOPEN_LOG_FILENAME = "pii-scan-guard-failopen.jsonl"
 
 # Extensions/basenames that can never carry meaningful PII content and are
 # never scanned. Deliberately narrow — see module docstring for why this does
@@ -508,7 +546,121 @@ def validate_scanner_response(result: object) -> tuple[str, list[dict]] | None:
     return "block", findings
 
 
-def _scanner_unavailable_result(mode: str, reason: str) -> tuple[int, str]:
+def _classify_scanner_exception(exc: Exception) -> str:
+    """Map an exception raised by `call_scanner` onto one of the two
+    exception-shaped fail-open categories (network error vs. timeout).
+
+    Deliberately matches on the exception's type name and message rather
+    than importing the `anthropic` SDK's specific error classes (e.g.
+    `anthropic.APITimeoutError`) -- `call_scanner` imports `anthropic`
+    lazily specifically so pure-function tests never need it installed, and
+    classification must not force that import at module load time either.
+    """
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    if "timeout" in name or "timeout" in text:
+        return _CATEGORY_TIMEOUT
+    return _CATEGORY_NETWORK_ERROR
+
+
+
+# Anchored on a "code"/"status" keyword immediately before the digits so a
+# port number (e.g. "api.anthropic.com:443") is never misread as an HTTP
+# status -- the anthropic SDK's own error strings read "Error code: 401 -
+# ...", which this matches directly.
+_HTTP_STATUS_RE = re.compile(r"(?:code|status)[:\s]+([1-5]\d{2})\b", re.IGNORECASE)
+
+
+def _summarize_scanner_exception_for_log(exc: Exception) -> str:
+    """Produce a fixed-shape, secret-free summary of a scanner exception for
+    the durable fail-open log: the exception's type name, plus an HTTP
+    status code if one appears in the message.
+
+    This deliberately does NOT persist `str(exc)` verbatim. CodeQL flagged
+    the original version of this logging (which wrote `str(exc)` -- via the
+    `reason` string built two lines below `call_scanner_fn(prompt, api_key)`
+    -- straight into the durable JSONL log) as a clear-text-storage-of-
+    sensitive-information path: `exc` can be anything the `anthropic` SDK or
+    a lower HTTP layer chooses to raise, and nothing guarantees that never
+    includes request content (the API key, headers, etc.) -- e.g. a
+    client-side validation error or a debug-mode HTTP dump. A fixed-shape
+    "type name + status" summary carries enough signal to alert/triage on
+    ("the scanner failed N times, mostly TimeoutError") without ever
+    reading (and thus risking persisting) the raw exception text. The
+    caller-facing stderr message (`_scanner_unavailable_result`'s `reason`
+    parameter, printed at push time) is unchanged and still carries the
+    full detail for local operator debugging -- only the durable, greppable
+    log record is restricted to this summary.
+    """
+    name = type(exc).__name__
+    match = _HTTP_STATUS_RE.search(str(exc))
+    if match:
+        return f"{name} (status {match.group(1)})"
+    return name
+
+
+def _redact_secret(text: str, secret: str | None) -> str:
+    """Defense-in-depth backstop: remove any literal occurrence of `secret`
+    (the real API key, when known at the call site) from `text` before it
+    is ever persisted to the durable fail-open log. This is a second,
+    independent layer under _summarize_scanner_exception_for_log -- it
+    covers reasons that were never exception-derived in the first place
+    (e.g. the malformed-response reason, built from the scanner's own
+    response body) on the off chance the key ever ends up embedded there
+    too, and costs nothing when `secret` is falsy (the missing-API-key
+    path, where there is no key to leak)."""
+    if not secret:
+        return text
+    return text.replace(secret, "[REDACTED]")
+
+
+def _default_failopen_log_path(env: dict) -> Path:
+    """Resolve the durable fail-open log location from $LOBSTER_WORKSPACE,
+    mirroring dispatcher-state-stop.py's _resolve_inflight_path and
+    usage-accumulator.py's logs/ convention."""
+    workspace = Path(env.get("LOBSTER_WORKSPACE", str(Path.home() / "lobster-workspace")))
+    return workspace / "logs" / _FAILOPEN_LOG_FILENAME
+
+
+def log_failopen_event(
+    env: dict,
+    category: str,
+    reason: str,
+    mode: str,
+    log_path: Path | str | None = None,
+) -> None:
+    """Append one durable, greppable JSONL record of a fail-open event.
+
+    This is instrumentation, not part of the decision path: any failure
+    writing the record (unwritable directory, log_path pointing at a
+    directory, permissions) is swallowed rather than raised or surfaced,
+    so a logging problem can never change the hook's exit code or message.
+    """
+    target = Path(log_path) if log_path is not None else _default_failopen_log_path(env)
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "hook": "pii-scan-guard",
+        "category": category,
+        "reason": reason,
+        "mode": mode,
+    }
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError:
+        pass
+
+
+def _scanner_unavailable_result(
+    mode: str,
+    reason: str,
+    category: str,
+    env: dict,
+    log_path: Path | str | None = None,
+    log_reason: str | None = None,
+    api_key: str | None = None,
+) -> tuple[int, str]:
     """Decide the outcome when the scanner itself could not produce a
     verdict at all -- no API key, a network error, a timeout, a malformed
     response. Anything that lands here means we cannot claim the push is
@@ -526,7 +678,28 @@ def _scanner_unavailable_result(mode: str, reason: str) -> tuple[int, str]:
     enforcement, so a scanner outage there should still just warn -- it
     would be surprising and wrong for a hook nobody has enabled blocking on
     yet to start blocking pushes because of its own transient errors.
+
+    Always logs the event (see log_failopen_event, issue #2167) regardless
+    of mode -- a scanner outage is exactly as invisible in warn mode as in
+    block mode, since warn mode's non-blocking behavior only affects the
+    push outcome, not whether the outage itself deserves a durable record.
+
+    The persisted log record is never the raw `reason` string verbatim:
+    `log_reason` (a fixed-shape, secret-free summary -- see
+    _summarize_scanner_exception_for_log) is used in its place when the
+    caller supplies one, and -- regardless -- any literal occurrence of
+    `api_key` is stripped as a defense-in-depth backstop (see
+    _redact_secret). `reason` itself, and the stderr message built from it
+    below, are unchanged: the operator still sees full detail at push time,
+    only the durable/greppable log is restricted. See issue #2167 and the
+    CodeQL "clear-text storage of sensitive information" finding on the PR
+    that added this logging in the first place -- `exc` from a scanner
+    failure can be anything the anthropic SDK or a lower HTTP layer raises,
+    with no guarantee it excludes request content (including api_key).
     """
+    raw_log_reason = log_reason if log_reason is not None else reason
+    sanitized_log_reason = _redact_secret(raw_log_reason, api_key)
+    log_failopen_event(env=env, category=category, reason=sanitized_log_reason, mode=mode, log_path=log_path)
     remediation = (
         f"Investigate the scanner error, or set {_ENV_BYPASS}=1 to "
         "deliberately bypass this one push if you've reviewed it yourself."
@@ -549,12 +722,16 @@ def run(
     env: dict,
     repo_root: str,
     call_scanner_fn=call_scanner,
+    failopen_log_path: Path | str | None = None,
 ) -> tuple[int, str]:
     """Decide the push outcome. Returns (exit_code, message-for-stderr).
 
     This is the fully-testable core: every side effect (the network call,
     the environment, the stdin payload) is passed in, so callers (tests, or
-    main()) control all of it."""
+    main()) control all of it. `failopen_log_path` is injected the same way
+    `call_scanner_fn` is -- tests pass a tmp_path file; main() leaves it
+    None so _scanner_unavailable_result falls back to the real
+    $LOBSTER_WORKSPACE/logs location (see _default_failopen_log_path)."""
     mode = env.get(_ENV_MODE, "off").strip().lower()
     if mode == "off":
         return 0, ""
@@ -594,13 +771,19 @@ def run(
         api_key = load_api_key(find_config_file(), env)
         if not api_key:
             return _scanner_unavailable_result(
-                mode, "no ANTHROPIC_API_KEY configured — cannot run PII scan"
+                mode, "no ANTHROPIC_API_KEY configured — cannot run PII scan",
+                _CATEGORY_MISSING_API_KEY, env, failopen_log_path,
             )
 
         try:
             result = call_scanner_fn(prompt, api_key)
         except Exception as exc:  # noqa: BLE001 - any scanner failure fails closed
-            return _scanner_unavailable_result(mode, f"scanner call failed ({exc})")
+            return _scanner_unavailable_result(
+                mode, f"scanner call failed ({exc})",
+                _classify_scanner_exception(exc), env, failopen_log_path,
+                log_reason=_summarize_scanner_exception_for_log(exc),
+                api_key=api_key,
+            )
 
         validated = validate_scanner_response(result)
         if validated is None:
@@ -612,7 +795,9 @@ def run(
             # mode, so route through the same _scanner_unavailable_result
             # path (fails closed in block mode, warns in warn mode).
             return _scanner_unavailable_result(
-                mode, f"scanner returned an invalid response ({result!r})"
+                mode, f"scanner returned an invalid response ({result!r})",
+                _CATEGORY_MALFORMED_RESPONSE, env, failopen_log_path,
+                api_key=api_key,
             )
         verdict, findings = validated
 
