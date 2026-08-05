@@ -1,0 +1,566 @@
+"""
+Unit tests for hooks/pii-scan-guard.py
+
+Tests cover:
+- Pre-push stdin protocol parsing (parse_pre_push_refs)
+- Diff base resolution for existing-branch and new-branch pushes, against a
+  real temporary git repository (resolve_diff_base / get_diff)
+- PII-relevant diff filtering: binaries/lockfiles excluded, everything else
+  (including .md/.txt/.csv/.json) kept, truncation at the size cap
+  (should_skip_file_for_pii_scan / filter_diff_for_scan)
+- Allowlist loading (.security-allowlist format reuse)
+- API key resolution precedence (env var over config file)
+- The orchestration core (`run`) with an injected fake scanner: mode gating
+  (off/warn/block), the emergency bypass, fail-open on missing API key and
+  on scanner exceptions, and the actual block/allow/no-op decisions
+- Full CLI subprocess invocation for the mode gate and bypass (no network
+  required for these paths)
+
+Convention: pure functions are imported directly via importlib.util (as in
+test_pin_dependencies_guard.py); the orchestration core is exercised via
+direct calls to `run()` with an injected `call_scanner_fn` (function
+injection is possible because `run()` accepts a scanner callable), which
+avoids mocking the network boundary function/module directly; a few CLI-level
+behaviors (mode=off, bypass) that never touch the network are exercised via
+subprocess to prove the real executable path works end-to-end.
+"""
+
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+_HOOKS_DIR = Path(__file__).parents[3] / "hooks"
+HOOK_PATH = _HOOKS_DIR / "pii-scan-guard.py"
+
+_ENV_MODE = "LOBSTER_PII_SCAN_MODE"
+_ENV_BYPASS = "LOBSTER_PII_SCAN_SKIP"
+_ZERO_SHA = "0" * 40
+
+
+def _load_module():
+    spec = importlib.util.spec_from_file_location("pii_scan_guard", HOOK_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_mod = _load_module()
+parse_pre_push_refs = _mod.parse_pre_push_refs
+resolve_diff_base = _mod.resolve_diff_base
+get_diff = _mod.get_diff
+should_skip_file_for_pii_scan = _mod.should_skip_file_for_pii_scan
+filter_diff_for_scan = _mod.filter_diff_for_scan
+load_allowlist = _mod.load_allowlist
+build_user_prompt = _mod.build_user_prompt
+load_api_key = _mod.load_api_key
+find_config_file = _mod.find_config_file
+format_findings_message = _mod.format_findings_message
+run = _mod.run
+_MAX_DIFF_CHARS = _mod._MAX_DIFF_CHARS
+_EMPTY_TREE_SHA = _mod._EMPTY_TREE_SHA
+
+
+# ---------------------------------------------------------------------------
+# parse_pre_push_refs
+# ---------------------------------------------------------------------------
+
+
+class TestParsePrePushRefs:
+    def test_single_ref_line(self):
+        stdin = "refs/heads/main abc123 refs/heads/main def456\n"
+        assert parse_pre_push_refs(stdin) == [
+            ("refs/heads/main", "abc123", "refs/heads/main", "def456")
+        ]
+
+    def test_multiple_ref_lines(self):
+        stdin = (
+            "refs/heads/a sha1 refs/heads/a sha2\n"
+            "refs/heads/b sha3 refs/heads/b sha4\n"
+        )
+        refs = parse_pre_push_refs(stdin)
+        assert len(refs) == 2
+        assert refs[0][0] == "refs/heads/a"
+        assert refs[1][0] == "refs/heads/b"
+
+    def test_blank_lines_ignored(self):
+        stdin = "\nrefs/heads/main sha1 refs/heads/main sha2\n\n"
+        assert len(parse_pre_push_refs(stdin)) == 1
+
+    def test_malformed_line_skipped_not_raised(self):
+        stdin = "this is not a valid ref line\nrefs/heads/main s1 refs/heads/main s2\n"
+        refs = parse_pre_push_refs(stdin)
+        assert len(refs) == 1
+
+    def test_empty_stdin_returns_empty_list(self):
+        assert parse_pre_push_refs("") == []
+
+
+# ---------------------------------------------------------------------------
+# Git-backed diff resolution
+# ---------------------------------------------------------------------------
+
+
+def _run_git(args, cwd):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _git_rev(cwd, ref="HEAD"):
+    return subprocess.run(
+        ["git", "rev-parse", ref], cwd=cwd, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+@pytest.fixture
+def git_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run_git(["init", "-q"], repo)
+    _run_git(["config", "user.email", "test@example.com"], repo)
+    _run_git(["config", "user.name", "Test"], repo)
+    return repo
+
+
+class TestResolveDiffBaseExistingBranch:
+    def test_existing_branch_base_is_remote_sha(self, git_repo):
+        (git_repo / "a.txt").write_text("v1\n")
+        _run_git(["add", "a.txt"], git_repo)
+        _run_git(["commit", "-q", "-m", "c1"], git_repo)
+        remote_sha = _git_rev(git_repo)
+
+        (git_repo / "a.txt").write_text("v2\n")
+        _run_git(["add", "a.txt"], git_repo)
+        _run_git(["commit", "-q", "-m", "c2"], git_repo)
+        local_sha = _git_rev(git_repo)
+
+        base = resolve_diff_base(remote_sha, local_sha, str(git_repo))
+        assert base == remote_sha
+
+    def test_no_op_update_returns_none(self, git_repo):
+        (git_repo / "a.txt").write_text("v1\n")
+        _run_git(["add", "a.txt"], git_repo)
+        _run_git(["commit", "-q", "-m", "c1"], git_repo)
+        sha = _git_rev(git_repo)
+        assert resolve_diff_base(sha, sha, str(git_repo)) is None
+
+    def test_get_diff_shows_changed_content(self, git_repo):
+        (git_repo / "a.txt").write_text("v1\n")
+        _run_git(["add", "a.txt"], git_repo)
+        _run_git(["commit", "-q", "-m", "c1"], git_repo)
+        remote_sha = _git_rev(git_repo)
+
+        (git_repo / "a.txt").write_text("v2 with secret@example.com\n")
+        _run_git(["add", "a.txt"], git_repo)
+        _run_git(["commit", "-q", "-m", "c2"], git_repo)
+        local_sha = _git_rev(git_repo)
+
+        diff = get_diff(remote_sha, local_sha, str(git_repo))
+        assert "secret@example.com" in diff
+        assert "diff --git a/a.txt b/a.txt" in diff
+
+    def test_get_diff_with_none_base_is_empty(self, git_repo):
+        assert get_diff(None, "HEAD", str(git_repo)) == ""
+
+
+class TestResolveDiffBaseNewBranch:
+    def test_new_branch_with_no_remotes_falls_back_to_empty_tree(self, git_repo):
+        # A brand-new repo pushed for the very first time: no remote-tracking
+        # refs exist at all, so every commit is "new" and the diff base
+        # should be the empty tree (the whole history is being pushed).
+        (git_repo / "a.txt").write_text("v1\n")
+        _run_git(["add", "a.txt"], git_repo)
+        _run_git(["commit", "-q", "-m", "root commit"], git_repo)
+        local_sha = _git_rev(git_repo)
+
+        base = resolve_diff_base(_ZERO_SHA, local_sha, str(git_repo))
+        assert base == _EMPTY_TREE_SHA
+
+        diff = get_diff(base, local_sha, str(git_repo))
+        assert "a.txt" in diff
+        assert "+v1" in diff
+
+    def test_new_branch_diffs_only_commits_not_on_any_remote(self, git_repo):
+        # Simulate: main already exists as a remote-tracking ref (origin/main)
+        # at commit A. A new local branch adds commit B on top and is being
+        # pushed for the first time (remote_sha is zero for THIS ref, but
+        # commit A is already known via origin/main).
+        (git_repo / "a.txt").write_text("v1\n")
+        _run_git(["add", "a.txt"], git_repo)
+        _run_git(["commit", "-q", "-m", "A"], git_repo)
+        commit_a = _git_rev(git_repo)
+
+        # Fake a remote-tracking ref pointing at commit A, so commit A is
+        # considered "already on the remote" from --not --remotes' point of view.
+        _run_git(["update-ref", "refs/remotes/origin/main", commit_a], git_repo)
+
+        (git_repo / "b.txt").write_text("new file\n")
+        _run_git(["add", "b.txt"], git_repo)
+        _run_git(["commit", "-q", "-m", "B"], git_repo)
+        commit_b = _git_rev(git_repo)
+
+        base = resolve_diff_base(_ZERO_SHA, commit_b, str(git_repo))
+        assert base == commit_a
+
+        diff = get_diff(base, commit_b, str(git_repo))
+        assert "b.txt" in diff
+        assert "a.txt" not in diff  # commit A's content is not new
+
+
+# ---------------------------------------------------------------------------
+# should_skip_file_for_pii_scan / filter_diff_for_scan
+# ---------------------------------------------------------------------------
+
+
+class TestShouldSkipFileForPiiScan:
+    @pytest.mark.parametrize("path", [
+        "package-lock.json",
+        "frontend/package-lock.json",
+        "yarn.lock",
+        "uv.lock",
+        "vendor/some.dylib",
+        "assets/logo.png",
+        "fonts/icon.woff2",
+    ])
+    def test_binary_and_lockfile_paths_are_skipped(self, path):
+        assert should_skip_file_for_pii_scan(path) is True
+
+    @pytest.mark.parametrize("path", [
+        "README.md",
+        "notes.txt",
+        "export.csv",
+        "contacts.json",
+        "src/app.py",
+        "docs/design.rst",
+    ])
+    def test_docs_and_data_formats_are_NOT_skipped(self, path):
+        # Deliberate divergence from scripts/security-scan-lib.sh's
+        # should_skip_file: a CRM/contact export is exactly as likely to be
+        # a .csv/.json/.txt as a .md, so none of these are exempted here.
+        assert should_skip_file_for_pii_scan(path) is False
+
+
+class TestFilterDiffForScan:
+    def _make_diff(self, files_and_bodies):
+        parts = []
+        for path, body in files_and_bodies:
+            parts.append(
+                f"diff --git a/{path} b/{path}\n"
+                f"index 000..111 100644\n"
+                f"--- a/{path}\n"
+                f"+++ b/{path}\n"
+                f"{body}\n"
+            )
+        return "".join(parts)
+
+    def test_lockfile_block_is_dropped_other_kept(self):
+        diff = self._make_diff([
+            ("package-lock.json", "@@ -1 +1 @@\n+some lockfile churn"),
+            ("notes.txt", "@@ -1 +1 @@\n+jane@example.com"),
+        ])
+        filtered, truncated = filter_diff_for_scan(diff)
+        assert "lockfile churn" not in filtered
+        assert "jane@example.com" in filtered
+        assert truncated is False
+
+    def test_binary_marker_block_is_dropped(self):
+        diff = "diff --git a/logo.bin b/logo.bin\nBinary files a/logo.bin and b/logo.bin differ\n"
+        filtered, truncated = filter_diff_for_scan(diff)
+        assert filtered == ""
+        assert truncated is False
+
+    def test_truncates_oversized_diff(self):
+        big_body = "@@ -1 +1 @@\n" + ("+x" * (_MAX_DIFF_CHARS + 1000))
+        diff = self._make_diff([("huge.txt", big_body)])
+        filtered, truncated = filter_diff_for_scan(diff)
+        assert truncated is True
+        assert len(filtered) == _MAX_DIFF_CHARS
+
+    def test_small_diff_not_truncated(self):
+        diff = self._make_diff([("small.txt", "@@ -1 +1 @@\n+hello")])
+        filtered, truncated = filter_diff_for_scan(diff)
+        assert truncated is False
+
+
+# ---------------------------------------------------------------------------
+# Allowlist
+# ---------------------------------------------------------------------------
+
+
+class TestLoadAllowlist:
+    def test_missing_file_returns_empty_list(self, tmp_path):
+        assert load_allowlist(str(tmp_path)) == []
+
+    def test_parses_entries_skips_comments_and_blanks(self, tmp_path):
+        (tmp_path / ".security-allowlist").write_text(
+            "# a comment\n\nEloso\nTrinity Rail\n  \n# another\nnoreply@github.com\n"
+        )
+        entries = load_allowlist(str(tmp_path))
+        assert entries == ["Eloso", "Trinity Rail", "noreply@github.com"]
+
+    def test_allowlist_entries_appear_in_prompt(self):
+        prompt = build_user_prompt("diff content here", ["Eloso", "Trinity Rail"])
+        assert "Eloso" in prompt
+        assert "Trinity Rail" in prompt
+        assert "diff content here" in prompt
+
+    def test_no_allowlist_section_when_empty(self):
+        prompt = build_user_prompt("diff content", [])
+        assert "ALLOWLIST" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# API key resolution
+# ---------------------------------------------------------------------------
+
+
+class TestLoadApiKey:
+    def test_env_var_takes_priority(self, tmp_path):
+        config = tmp_path / "config.env"
+        config.write_text("ANTHROPIC_API_KEY=from-file\n")
+        key = load_api_key(config, env={"ANTHROPIC_API_KEY": "from-env"})
+        assert key == "from-env"
+
+    def test_falls_back_to_config_file(self, tmp_path):
+        config = tmp_path / "config.env"
+        config.write_text("ANTHROPIC_API_KEY=from-file-value\n")
+        key = load_api_key(config, env={})
+        assert key == "from-file-value"
+
+    def test_quoted_value_stripped(self, tmp_path):
+        config = tmp_path / "config.env"
+        config.write_text('ANTHROPIC_API_KEY="quoted-value"\n')
+        assert load_api_key(config, env={}) == "quoted-value"
+
+    def test_no_config_no_env_returns_none(self):
+        assert load_api_key(None, env={}) is None
+
+    def test_missing_key_in_config_returns_none(self, tmp_path):
+        config = tmp_path / "config.env"
+        config.write_text("OTHER_KEY=value\n")
+        assert load_api_key(config, env={}) is None
+
+    def test_find_config_file_respects_lobster_config_dir(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / "custom-config"
+        config_dir.mkdir()
+        (config_dir / "config.env").write_text("ANTHROPIC_API_KEY=x\n")
+        monkeypatch.setenv("LOBSTER_CONFIG_DIR", str(config_dir))
+        found = find_config_file()
+        assert found == config_dir / "config.env"
+
+
+# ---------------------------------------------------------------------------
+# format_findings_message
+# ---------------------------------------------------------------------------
+
+
+class TestFormatFindingsMessage:
+    def test_includes_file_line_category_reason(self):
+        findings = [{
+            "file": "export.csv",
+            "line": 42,
+            "category": "crm-export",
+            "snippet": "Jane Doe,jane@realcompany.com,555-1234",
+            "reason": "Looks like a real contact list row.",
+        }]
+        message = format_findings_message(findings)
+        assert "export.csv:42" in message
+        assert "crm-export" in message
+        assert "Jane Doe" in message
+        assert "Looks like a real contact list row." in message
+
+    def test_mentions_allowlist_and_bypass_remediation(self):
+        message = format_findings_message([{"file": "f", "line": 1, "category": "c", "snippet": "s", "reason": "r"}])
+        assert ".security-allowlist" in message
+        assert "LOBSTER_PII_SCAN_SKIP" in message
+
+    def test_zero_line_number_omitted_from_location(self):
+        findings = [{"file": "f.txt", "line": 0, "category": "c", "snippet": "s", "reason": "r"}]
+        message = format_findings_message(findings)
+        assert "f.txt:0" not in message
+
+
+# ---------------------------------------------------------------------------
+# Orchestration core: run()
+# ---------------------------------------------------------------------------
+
+_SOME_REF_LINE = "refs/heads/main sha1new refs/heads/main sha1old\n"
+
+
+def _fake_scanner_returning(verdict, findings=None):
+    def _fn(prompt, api_key):
+        return {"verdict": verdict, "findings": findings or []}
+    return _fn
+
+
+def _fake_scanner_raising(exc):
+    def _fn(prompt, api_key):
+        raise exc
+    return _fn
+
+
+class TestRunModeGating:
+    def test_mode_off_is_default_and_never_scans(self, git_repo, monkeypatch):
+        called = []
+        def fake(prompt, key):
+            called.append(1)
+            return {"verdict": "block", "findings": [{"file": "f", "line": 1, "category": "c", "snippet": "s", "reason": "r"}]}
+        code, message = run(_SOME_REF_LINE, {}, str(git_repo), call_scanner_fn=fake)
+        assert code == 0
+        assert message == ""
+        assert called == []
+
+    def test_unknown_mode_treated_as_off(self, git_repo):
+        code, message = run(_SOME_REF_LINE, {_ENV_MODE: "bogus"}, str(git_repo), call_scanner_fn=_fake_scanner_returning("block"))
+        assert code == 0
+        assert "Unknown" in message
+
+    def test_bypass_env_var_skips_scan_even_in_block_mode(self, git_repo):
+        called = []
+        def fake(prompt, key):
+            called.append(1)
+            return {"verdict": "block", "findings": []}
+        code, message = run(
+            _SOME_REF_LINE,
+            {_ENV_MODE: "block", _ENV_BYPASS: "1"},
+            str(git_repo),
+            call_scanner_fn=fake,
+        )
+        assert code == 0
+        assert "SKIPPED" in message
+        assert called == []
+
+
+class TestRunScanDecisions:
+    def _push_a_change(self, git_repo, content="hello world\n"):
+        (git_repo / "a.txt").write_text("v1\n")
+        self._commit(git_repo, "c1")
+        remote_sha = _git_rev(git_repo)
+        (git_repo / "a.txt").write_text(content)
+        self._commit(git_repo, "c2")
+        local_sha = _git_rev(git_repo)
+        return remote_sha, local_sha
+
+    def _commit(self, repo, message):
+        _run_git(["add", "-A"], repo)
+        _run_git(["commit", "-q", "-m", message], repo)
+
+    def test_block_mode_confident_finding_blocks_push(self, git_repo):
+        remote_sha, local_sha = self._push_a_change(git_repo, "jane.doe@realcompany.com, 555-867-5309\n")
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        finding = {"file": "a.txt", "line": 1, "category": "pii", "snippet": "jane.doe@realcompany.com", "reason": "real contact"}
+        code, message = run(stdin, {_ENV_MODE: "block"}, str(git_repo), call_scanner_fn=_fake_scanner_returning("block", [finding]))
+        assert code == 1
+        assert "BLOCKED" in message
+        assert "a.txt" in message
+
+    def test_warn_mode_confident_finding_does_not_block(self, git_repo):
+        remote_sha, local_sha = self._push_a_change(git_repo, "jane.doe@realcompany.com\n")
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        finding = {"file": "a.txt", "line": 1, "category": "pii", "snippet": "x", "reason": "y"}
+        code, message = run(stdin, {_ENV_MODE: "warn"}, str(git_repo), call_scanner_fn=_fake_scanner_returning("block", [finding]))
+        assert code == 0
+        assert "WARNING" in message
+        assert "BLOCKED" in message  # the underlying finding text is still shown
+
+    def test_allow_verdict_produces_no_message(self, git_repo):
+        remote_sha, local_sha = self._push_a_change(git_repo, "just some ordinary code change\n")
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        code, message = run(stdin, {_ENV_MODE: "block"}, str(git_repo), call_scanner_fn=_fake_scanner_returning("allow"))
+        assert code == 0
+        assert message == ""
+
+    def test_no_op_ref_update_skips_scan_entirely(self, git_repo):
+        (git_repo / "a.txt").write_text("v1\n")
+        self._commit(git_repo, "c1")
+        sha = _git_rev(git_repo)
+        stdin = f"refs/heads/main {sha} refs/heads/main {sha}\n"
+        called = []
+        def fake(prompt, key):
+            called.append(1)
+            return {"verdict": "block", "findings": []}
+        code, message = run(stdin, {_ENV_MODE: "block"}, str(git_repo), call_scanner_fn=fake)
+        assert code == 0
+        assert called == []
+
+    def test_lockfile_only_push_skips_llm_call_entirely(self, git_repo):
+        (git_repo / "package-lock.json").write_text("{}\n")
+        self._commit(git_repo, "c1")
+        remote_sha = _git_rev(git_repo)
+        (git_repo / "package-lock.json").write_text('{"churn": true}\n')
+        self._commit(git_repo, "c2")
+        local_sha = _git_rev(git_repo)
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        called = []
+        def fake(prompt, key):
+            called.append(1)
+            return {"verdict": "allow", "findings": []}
+        code, message = run(stdin, {_ENV_MODE: "block"}, str(git_repo), call_scanner_fn=fake)
+        assert code == 0
+        assert called == []  # cost containment: no scannable content, no API call
+
+    def test_missing_api_key_fails_open(self, git_repo, monkeypatch):
+        remote_sha, local_sha = self._push_a_change(git_repo)
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        monkeypatch.setattr(_mod, "find_config_file", lambda: None)
+        code, message = run(stdin, {_ENV_MODE: "block", "ANTHROPIC_API_KEY": ""}, str(git_repo), call_scanner_fn=_fake_scanner_returning("block", [{"file": "a", "line": 1, "category": "c", "snippet": "s", "reason": "r"}]))
+        assert code == 0
+        assert "no ANTHROPIC_API_KEY" in message
+        assert "failing open" in message
+
+    def test_scanner_exception_fails_open(self, git_repo):
+        remote_sha, local_sha = self._push_a_change(git_repo)
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        code, message = run(
+            stdin,
+            {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"},
+            str(git_repo),
+            call_scanner_fn=_fake_scanner_raising(TimeoutError("scan timed out")),
+        )
+        assert code == 0
+        assert "failing open" in message
+        assert "scan timed out" in message
+
+    def test_truncation_note_surfaced_when_allow_verdict(self, git_repo):
+        big_content = "x" * (_MAX_DIFF_CHARS + 5000)
+        remote_sha, local_sha = self._push_a_change(git_repo, big_content)
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        code, message = run(stdin, {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"}, str(git_repo), call_scanner_fn=_fake_scanner_returning("allow"))
+        assert code == 0
+        assert "truncated" in message
+
+
+# ---------------------------------------------------------------------------
+# Full CLI subprocess: only network-free paths (mode=off, bypass)
+# ---------------------------------------------------------------------------
+
+
+def _run_hook_cli(stdin_text, env, cwd):
+    full_env = os.environ.copy()
+    full_env.update(env)
+    return subprocess.run(
+        [sys.executable, str(HOOK_PATH)],
+        input=stdin_text, cwd=cwd, env=full_env,
+        capture_output=True, text=True,
+    )
+
+
+class TestCliSubprocess:
+    def test_default_mode_off_exits_zero_silently(self, git_repo):
+        env = os.environ.copy()
+        env.pop(_ENV_MODE, None)
+        result = _run_hook_cli(_SOME_REF_LINE, {}, str(git_repo))
+        assert result.returncode == 0
+        assert result.stderr == ""
+
+    def test_bypass_flag_exits_zero_with_notice(self, git_repo):
+        result = _run_hook_cli(_SOME_REF_LINE, {_ENV_MODE: "block", _ENV_BYPASS: "1"}, str(git_repo))
+        assert result.returncode == 0
+        assert "SKIPPED" in result.stderr
+
+    def test_empty_stdin_exits_zero(self, git_repo):
+        result = _run_hook_cli("", {_ENV_MODE: "block"}, str(git_repo))
+        assert result.returncode == 0
