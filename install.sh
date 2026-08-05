@@ -2037,6 +2037,29 @@ else
     info "Skipping system-file-protect hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code PreToolUse hook to enforce exact dependency pinning
+# (blocks unpinned ranges in manifests and silent-latest package-manager
+# invocations; see hooks/pin-dependencies-guard.py docstring for full scope)
+chmod +x "$INSTALL_DIR/hooks/pin-dependencies-guard.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("pin-dependencies-guard"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Edit|Write|NotebookEdit|Bash",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/pin-dependencies-guard.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "pin-dependencies-guard hook installed"
+    else
+        info "pin-dependencies-guard hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping pin-dependencies-guard hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code PostToolUse hook to restore execute bit after Edit/Write
 chmod +x "$INSTALL_DIR/hooks/restore-exec-bit.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then

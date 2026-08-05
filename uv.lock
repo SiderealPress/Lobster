@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [manifest]
-overrides = [{ name = "pillow", specifier = ">=12.1.1" }]
+overrides = [{ name = "pillow", specifier = "==12.1.1" }]
 
 [[package]]
 name = "aiohappyeyeballs"
@@ -914,34 +914,34 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cryptography", specifier = ">=42.0.0" },
-    { name = "fastembed", specifier = ">=0.3.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "mcp", specifier = ">=1.0.0" },
-    { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.40.0" },
-    { name = "psutil", specifier = ">=5.9.0" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23.0" },
-    { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=5.0.0" },
-    { name = "pytest-timeout", marker = "extra == 'test'", specifier = ">=2.2.0" },
-    { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "python-telegram-bot", specifier = ">=21.0" },
-    { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.18.0" },
-    { name = "slack-sdk", marker = "extra == 'slack'", specifier = ">=3.27.0" },
-    { name = "sqlite-vec", specifier = ">=0.1.7a1" },
-    { name = "starlette", specifier = ">=0.37.0" },
-    { name = "twilio", specifier = ">=9.0.0" },
-    { name = "tzdata", marker = "extra == 'windows'", specifier = ">=2024.1" },
-    { name = "uvicorn", specifier = ">=0.29.0" },
-    { name = "watchdog", specifier = ">=4.0.0" },
-    { name = "websockets", specifier = ">=13.0" },
+    { name = "cryptography", specifier = "==46.0.5" },
+    { name = "fastembed", specifier = "==0.7.4" },
+    { name = "httpx", specifier = "==0.28.1" },
+    { name = "mcp", specifier = "==1.26.0" },
+    { name = "playwright", marker = "extra == 'browser'", specifier = "==1.58.0" },
+    { name = "psutil", specifier = "==7.2.2" },
+    { name = "pytest", marker = "extra == 'test'", specifier = "==9.0.2" },
+    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = "==1.3.0" },
+    { name = "pytest-cov", marker = "extra == 'test'", specifier = "==7.0.0" },
+    { name = "pytest-timeout", marker = "extra == 'test'", specifier = "==2.4.0" },
+    { name = "python-dotenv", specifier = "==1.2.1" },
+    { name = "python-telegram-bot", specifier = "==22.6" },
+    { name = "slack-bolt", marker = "extra == 'slack'", specifier = "==1.27.0" },
+    { name = "slack-sdk", marker = "extra == 'slack'", specifier = "==3.40.1" },
+    { name = "sqlite-vec", specifier = "==0.1.7a10" },
+    { name = "starlette", specifier = "==0.52.1" },
+    { name = "twilio", specifier = "==9.10.3" },
+    { name = "tzdata", marker = "extra == 'windows'", specifier = "==2026.1" },
+    { name = "uvicorn", specifier = "==0.41.0" },
+    { name = "watchdog", specifier = "==6.0.0" },
+    { name = "websockets", specifier = "==16.0" },
 ]
 provides-extras = ["dashboard", "windows", "browser", "slack", "test"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "pytest", specifier = ">=9.0.2" },
-    { name = "pytest-asyncio", specifier = ">=1.3.0" },
+    { name = "pytest", specifier = "==9.0.2" },
+    { name = "pytest-asyncio", specifier = "==1.3.0" },
 ]
 
 [[package]]

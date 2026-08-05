@@ -1,4 +1,9 @@
 # Obsidian KM MCP Server dependencies
-mcp>=1.0.0
-python-frontmatter>=1.0.0
-python-dotenv>=1.0.0
+# Pinned per the dependency-pinning policy (see DEPENDENCY_NOTES.md at repo
+# root). mcp/python-dotenv aligned to the same version pinned in the root
+# pyproject.toml; python-frontmatter has no root anchor and was pinned to
+# the version a fresh resolve returned (no prior local install to verify
+# against). Audit date: 2026-08-04.
+mcp==1.26.0
+python-frontmatter==1.3.0
+python-dotenv==1.2.1
