@@ -260,19 +260,49 @@ _SKIP_BINARY_EXTENSIONS = (
 )
 
 
-def should_skip_file(filepath: str) -> bool:
+def _should_skip_file_common(filepath: str) -> bool:
+    """Files never scanned by ANY check: hook source, test fixtures, binaries.
+
+    Mirrors .githooks/pre-push's should_skip_file_common(). Deliberately does
+    NOT include the doc-file exemption -- that is narrower and category
+    specific (see is_doc_file() / should_skip_file() below and #2160).
+    """
     if filepath.startswith(".githooks/"):
         return True
     if filepath.startswith(_SKIP_EXACT_DIR_PREFIXES):
         return True
     if any(marker in filepath for marker in _SKIP_MID_PATH_MARKERS):
         return True
-    if filepath.endswith(_SKIP_DOC_EXTENSIONS):
-        return True
     ext = filepath.rsplit(".", 1)[-1].lower() if "." in filepath else ""
     if ext in _SKIP_BINARY_EXTENSIONS:
         return True
     return False
+
+
+def is_doc_file(filepath: str) -> bool:
+    """True for documentation files (*.md, *.mdx, *.rst, *.txt, *.adoc).
+
+    Doc files are exempt from PII / instance / personal-name checks (examples
+    and placeholder values are legitimate documentation content) but are NOT
+    exempt from SECURITY_PATTERNS (secret/token) checks -- a real secret
+    pasted into a doc file is still a leak. Mirrors .githooks/pre-push's
+    is_doc_file(); see its comment referencing #2160, where a real Telegram
+    bot token sat undetected in docs/DOCKER-TESTING.md for months because the
+    old exemption covered secrets too.
+    """
+    return filepath.endswith(_SKIP_DOC_EXTENSIONS)
+
+
+def should_skip_file(filepath: str) -> bool:
+    """Full skip (all categories, including SECURITY_PATTERNS).
+
+    Kept for backward compatibility / callers that want the coarse check; the
+    scan_diff loop below does NOT use this for its overall gate -- it uses
+    _should_skip_file_common() for the universal skip and is_doc_file() as a
+    narrower, category-specific exemption so doc files still get scanned for
+    secrets.
+    """
+    return _should_skip_file_common(filepath) or is_doc_file(filepath)
 
 
 def is_placeholder_value(line: str) -> bool:
@@ -374,13 +404,19 @@ def scan_diff(
             content = raw_line[1:]
             fp = current_file or "<unknown>"
 
-            if current_file and should_skip_file(current_file):
+            if current_file and _should_skip_file_common(current_file):
                 continue
+
+            # Doc files (*.md, *.mdx, *.rst, *.txt, *.adoc) are exempt from
+            # PII / instance / personal-name checks below, but NOT from the
+            # secret/token checks (SECURITY_PATTERNS) -- see is_doc_file()
+            # and #2160 for why that split matters.
+            skip_pii_checks = bool(current_file and is_doc_file(current_file))
 
             has_nosec = bool(NOSEC_RE.search(content))
             has_noname = bool(NONAME_RE.search(content))
 
-            if not has_nosec:
+            if not has_nosec and not skip_pii_checks:
                 for pat in instance_patterns:
                     if pat.regex.search(content):
                         if is_allowlisted(allowlist, fp, pat.description):
@@ -401,6 +437,9 @@ def scan_diff(
                         continue
                     findings.append(Finding(fp, line_num, pat.description, content))
 
+            if not has_nosec:
+                # Security patterns always run, regardless of skip_pii_checks --
+                # doc files are scanned for secrets/tokens too (fix for #2160).
                 for pat in SECURITY_PATTERNS:
                     if not pat.regex.search(content):
                         continue
@@ -412,7 +451,7 @@ def scan_diff(
                         continue
                     findings.append(Finding(fp, line_num, pat.description, content))
 
-            if not has_noname:
+            if not has_noname and not skip_pii_checks:
                 for pat in name_patterns:
                     if not pat.regex.search(content):
                         continue
