@@ -47,28 +47,53 @@ is one allowlist to maintain, not two. Entries are handed to the scanner as
 "already reviewed, known-safe" context rather than used as a post-hoc regex
 filter — the model is asked not to flag anything matching an allowlist entry.
 
-**Fail-open, by design:** if the scanner cannot run at all — no API key
+**Fail-closed in block mode (explicit decision, overriding the original
+fail-open design):** if the scanner cannot run at all — no API key
 configured, a network error, a timeout, a malformed response — this hook
-WARNS and allows the push through; it does not block. A synchronous git hook
-that can fail closed on a transient API hiccup would brick every push on the
-system until someone notices and unsets it, which is a worse outcome than an
-occasional missed scan. This tradeoff is intentional: the blast radius of
-"scan didn't run this one time" is far smaller than "nobody can push
-anything, ever, until this hook is fixed or removed."
+BLOCKS the push in `block` mode rather than letting it through. The original
+version of this hook failed open here, on the theory that a synchronous git
+hook that can fail closed on a transient API hiccup would brick every push on
+the system. That tradeoff was reconsidered: for a hook whose entire purpose
+is stopping real customer PII from reaching a public repository, "the scan
+didn't run" and "the scan ran and found nothing" are not the same outcome,
+and treating them the same means a network blip or an expired key silently
+disables the one layer of defense that catches what the regex scanner
+cannot. `warn` mode is unaffected — a scanner failure there still only warns,
+since warn mode's entire purpose is passive observation before an operator
+opts into blocking, and it should not start blocking pushes on its own
+transient errors before that. `LOBSTER_PII_SCAN_SKIP=1` remains the
+deliberate, explicit escape hatch for a push the operator has already
+decided is safe.
 
-**Cost/latency:** every scan is a real Opus call — not free and not
-instant. Two things keep this proportional: (1) the diff is filtered to
+**Model:** the scanner runs on Claude Fable 5 (`claude-fable-5`), not Opus.
+This hook previously ran on Opus, which was shown (see the PR/issue history)
+to be foolable by realistic-looking PII wrapped in business, consulting,
+partnership, or "test fixture" framing — a named individual's real-looking
+contact record labeled as sample/fixture data for an integration test, or as
+a vendor/consulting-affiliate onboarding record, was scored "allow" when it
+should have blocked. Fable 5 was substituted specifically to close that gap
+(verified not to reproduce the same bypass on the same inputs), and the
+system prompt was also tightened (see pii-scan-guard.prompt.md) so the
+result does not depend on model choice alone.
+
+**Cost/latency:** every scan is a real Fable 5 call — not free and not
+instant, and Fable 5 in particular can take meaningfully longer per request
+than Opus did on hard/ambiguous inputs (it thinks more before answering).
+Two things keep the cost proportional: (1) the diff is filtered to
 PII-relevant content before it is sent, and if a push touches nothing but
 binaries/lockfiles the LLM is never called at all; (2) the diff sent to the
 model is capped at _MAX_DIFF_CHARS, with the push still evaluated against the
-truncated portion rather than refusing to scan large pushes outright. A
-human-visible latency of several seconds to roughly a minute per push that
-does contain real code changes is the accepted cost of catching what a regex
-cannot, given the stated stakes (real customer PII in a public repo).
+truncated portion rather than refusing to scan large pushes outright. Given
+the hook now fails closed on a timeout, _SCAN_TIMEOUT_SECONDS is set with
+enough headroom for Fable 5's longer turns rather than reusing Opus's budget
+— too tight a timeout would turn ordinary slow responses into spurious
+blocked pushes.
 
 Exit codes (matching git's pre-push hook protocol):
-  0 - Allow the push (including all warn-mode and fail-open outcomes)
-  1 - Block the push (mode=block, confident PII finding)
+  0 - Allow the push (warn-mode outcomes, and any outcome while mode="warn"
+      or mode="off", including scanner failures in those modes)
+  1 - Block the push (mode=block: a confident PII finding, OR the scanner
+      failing to produce one at all -- see "Fail-closed in block mode" above)
 """
 
 from __future__ import annotations
@@ -88,9 +113,15 @@ _ENV_MODE = "LOBSTER_PII_SCAN_MODE"
 _ENV_BYPASS = "LOBSTER_PII_SCAN_SKIP"
 _VALID_MODES = ("off", "warn", "block")
 
-_MODEL = "claude-opus-4-8"
+_MODEL = "claude-fable-5"
 _MAX_DIFF_CHARS = 200_000
-_SCAN_TIMEOUT_SECONDS = 60
+# Fable 5 turns can run noticeably longer than Opus did, especially on the
+# ambiguous business/consulting-framed inputs this hook exists to catch. Now
+# that a timeout fails CLOSED (see module docstring), too tight a budget
+# turns an ordinary slow response into a spurious blocked push -- 60s (the
+# prior Opus-tuned value) was observed timing out on real scan inputs during
+# migration testing.
+_SCAN_TIMEOUT_SECONDS = 180
 
 _ZERO_SHA = "0" * 40
 _EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -435,6 +466,42 @@ def format_findings_message(findings: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _scanner_unavailable_result(mode: str, reason: str) -> tuple[int, str]:
+    """Decide the outcome when the scanner itself could not produce a
+    verdict at all -- no API key, a network error, a timeout, a malformed
+    response. Anything that lands here means we cannot claim the push is
+    clean; the caller never learned "allow" or "block" from the model.
+
+    Fails CLOSED in block mode: not knowing whether a push contains PII is
+    treated the same as finding it, because in block mode the whole point of
+    this hook is that a push must be affirmatively cleared before it goes
+    out. Letting a scanner outage silently downgrade to "allow" would mean a
+    network blip or an expired key quietly turns off the one layer of
+    defense that catches what the regex scanner cannot.
+
+    Does NOT fail closed in warn mode: warn mode's entire purpose is passive
+    observation while an operator validates the hook before opting into
+    enforcement, so a scanner outage there should still just warn -- it
+    would be surprising and wrong for a hook nobody has enabled blocking on
+    yet to start blocking pushes because of its own transient errors.
+    """
+    remediation = (
+        f"Investigate the scanner error, or set {_ENV_BYPASS}=1 to "
+        "deliberately bypass this one push if you've reviewed it yourself."
+    )
+    if mode == "block":
+        return (
+            1,
+            f"[pii-scan-guard] BLOCKED: {reason} — failing closed because "
+            f"this push cannot be confirmed free of PII. {remediation}",
+        )
+    return (
+        0,
+        f"[pii-scan-guard] WARNING: {reason} — scan did not run this push "
+        f"(warn mode does not block). {remediation}",
+    )
+
+
 def run(
     stdin_text: str,
     env: dict,
@@ -483,22 +550,14 @@ def run(
 
         api_key = load_api_key(find_config_file(), env)
         if not api_key:
-            return (
-                0,
-                "[pii-scan-guard] WARNING: no ANTHROPIC_API_KEY configured — "
-                "skipping PII scan (failing open). Set one in config.env to "
-                "enable scanning.",
+            return _scanner_unavailable_result(
+                mode, "no ANTHROPIC_API_KEY configured — cannot run PII scan"
             )
 
         try:
             result = call_scanner_fn(prompt, api_key)
-        except Exception as exc:  # noqa: BLE001 - any scanner failure fails open
-            return (
-                0,
-                f"[pii-scan-guard] WARNING: scanner call failed ({exc}) — "
-                "failing open, push allowed. Investigate before relying on "
-                "this hook.",
-            )
+        except Exception as exc:  # noqa: BLE001 - any scanner failure fails closed
+            return _scanner_unavailable_result(mode, f"scanner call failed ({exc})")
 
         if result.get("verdict") == "block":
             all_findings.extend(result.get("findings", []))
