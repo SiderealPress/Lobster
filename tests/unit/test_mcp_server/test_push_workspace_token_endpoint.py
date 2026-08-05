@@ -109,6 +109,9 @@ def client_and_token_dir(tmp_path):
         patch(f"{_MODULE}._SESSION_HMAC_SECRET", _SESSION_HMAC_SECRET),
         patch(f"{_MODULE}._ENFORCE_WORKSPACE_SIGNED_SESSION", False),
         patch(f"{_MODULE}._seen_workspace_session_nonces", {}),
+        # Issue #2153: identity capture makes a real Google userinfo call by
+        # default -- patched out here so tests never touch the network.
+        patch(f"{_MODULE}._fetch_authenticated_email", return_value="test-user@example.com"),
     ):
         from src.mcp.inbox_server_http import app
 
@@ -465,3 +468,84 @@ def test_nonce_reuse_rejected_under_enforcement(client_and_token_dir):
         assert first.status_code == 200
         assert second.status_code == 401
         assert (token_dir / f"{_VALID_BODY['chat_id']}.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Issue #2153 -- identity metadata capture and cross-account mixup detection
+# ---------------------------------------------------------------------------
+
+
+def test_email_captured_and_stored_in_token_file(client_and_token_dir):
+    client, workspace_token_dir = client_and_token_dir
+    with patch(f"{_MODULE}._fetch_authenticated_email", return_value="account-a@example.com"):
+        resp = client.post(
+            "/api/push-workspace-token",
+            json=_VALID_BODY,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+        )
+    assert resp.status_code == 200
+    data = json.loads((workspace_token_dir / f"{_VALID_BODY['chat_id']}.json").read_text())
+    assert data["email"] == "account-a@example.com"
+
+
+def test_two_chat_ids_get_isolated_emails(client_and_token_dir):
+    """The exact scenario from the production incident this issue fixes:
+    two different chat_ids pushing tokens must never cross-contaminate each
+    other's stored email."""
+    client, workspace_token_dir = client_and_token_dir
+
+    body_a = {**_VALID_BODY, "chat_id": "1111111111"}
+    body_b = {**_VALID_BODY, "chat_id": "2222222222"}
+
+    with patch(f"{_MODULE}._fetch_authenticated_email", return_value="account-a@example.com"):
+        resp_a = client.post(
+            "/api/push-workspace-token",
+            json=body_a,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+        )
+    with patch(f"{_MODULE}._fetch_authenticated_email", return_value="account-b@example.com"):
+        resp_b = client.post(
+            "/api/push-workspace-token",
+            json=body_b,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+        )
+
+    assert resp_a.status_code == 200
+    assert resp_b.status_code == 200
+
+    data_a = json.loads((workspace_token_dir / "1111111111.json").read_text())
+    data_b = json.loads((workspace_token_dir / "2222222222.json").read_text())
+    assert data_a["email"] == "account-a@example.com"
+    assert data_b["email"] == "account-b@example.com"
+
+
+def test_reconnect_with_different_email_is_logged_as_mismatch(client_and_token_dir, caplog):
+    """A reconnect that lands on a different Google account than the one
+    already on file for this chat_id must be logged loudly (issue #2153 --
+    the production incident this fixes was invisible until an explicit API
+    call surfaced it; a mismatch must now surface at push time instead)."""
+    client, workspace_token_dir = client_and_token_dir
+
+    with patch(f"{_MODULE}._fetch_authenticated_email", return_value="account-a@example.com"):
+        client.post(
+            "/api/push-workspace-token",
+            json=_VALID_BODY,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+        )
+
+    with (
+        patch(f"{_MODULE}._fetch_authenticated_email", return_value="account-b@example.com"),
+        caplog.at_level(logging.WARNING),
+    ):
+        resp = client.post(
+            "/api/push-workspace-token",
+            json=_VALID_BODY,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+        )
+
+    assert resp.status_code == 200  # token is still saved -- never blocks the push
+    data = json.loads((workspace_token_dir / f"{_VALID_BODY['chat_id']}.json").read_text())
+    assert data["email"] == "account-b@example.com"
+    assert any(
+        "identity mismatch" in r.getMessage().lower() for r in caplog.records
+    ), "A cross-account mismatch must be logged loudly, not silently swallowed"
