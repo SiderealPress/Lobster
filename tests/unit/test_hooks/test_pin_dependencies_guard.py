@@ -955,6 +955,198 @@ class TestHookHeredocInterpreterExecutionIntegration:
         assert not _is_denied(stdout)
 
 
+# ---------------------------------------------------------------------------
+# (e6) Round-5 bypass: interpreter `-c "<code>"` and here-strings (`<<<`)
+# never got scanned at all — the whole thing was one sub-command starting
+# with `bash`/`sh`/`zsh`, so the quoted/here-string install command inside
+# was invisible to the install-detection regexes (independent review,
+# PR #2151, issuecomment-5187771322).
+# ---------------------------------------------------------------------------
+
+
+class TestDashCAndHereStringBypassPureFunction:
+    """The exact 5 bypass commands the round-4 independent review
+    demonstrated as silently ALLOWED must now be BLOCKED, plus the nested
+    wrapper-command forms (docker exec, sudo) that go through the same
+    code path."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'bash -c "pip install requests"',
+            'bash <<< "pip install requests"',
+            'sh -c "uv add requests"',
+            'zsh -c "pip install requests"',
+            'bash -c "npm install lodash"',
+            'docker exec bash -c "pip install requests"',
+            'sudo bash -c "npm install foo"',
+        ],
+    )
+    def test_named_bypass_now_blocked(self, command):
+        assert bash_introduces_unpinned_dependency(command) is not None, (
+            f"expected {command!r} to be detected as an unpinned install"
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # Pinned installs through the same forms must stay ALLOWED.
+            'bash -c "pip install requests==2.31.0"',
+            'bash <<< "pip install requests==2.31.0"',
+            'sh -c "uv add requests==2.31.0"',
+            'zsh -c "pip install requests==2.31.0"',
+            'bash -c "npm install lodash@4.17.21"',
+            'docker exec bash -c "pip install requests==2.31.0"',
+            'sudo bash -c "npm install foo@1.0.0"',
+            # Lockfile-respecting forms through -c must also stay ALLOWED.
+            'bash -c "npm ci"',
+            'bash -c "uv sync"',
+        ],
+    )
+    def test_pinned_or_lockfile_via_dash_c_or_here_string_not_blocked(self, command):
+        assert bash_introduces_unpinned_dependency(command) is None
+
+    def test_original_inert_heredoc_file_content_still_not_regressed(self):
+        """The round-2 false positive this fix must not reintroduce: example
+        install-command *text* used as file content in a heredoc (not
+        executed) must remain ALLOWED."""
+        command = "cat > f.sh <<EOF\npip install requests\nEOF\n"
+        assert bash_introduces_unpinned_dependency(command) is None
+
+    def test_interpreter_heredoc_execution_still_blocked(self):
+        """Existing (round-4) heredoc-fed-to-a-real-interpreter detection
+        must not regress."""
+        command = "bash <<EOF\npip install requests\nEOF\n"
+        assert bash_introduces_unpinned_dependency(command) is not None
+
+
+class TestHookDashCAndHereStringBypassIntegration:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'bash -c "pip install requests"',
+            'bash <<< "pip install requests"',
+            'sh -c "uv add requests"',
+            'zsh -c "pip install requests"',
+            'bash -c "npm install lodash"',
+            'docker exec bash -c "pip install requests"',
+            'sudo bash -c "npm install foo"',
+        ],
+    )
+    def test_named_bypass_blocked_via_full_hook(self, command):
+        rc, stdout, _ = _run_hook(_bash_payload(command))
+        assert rc == 0
+        assert _is_denied(stdout)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'bash -c "pip install requests==2.31.0"',
+            'bash <<< "pip install requests==2.31.0"',
+            'bash -c "npm ci"',
+        ],
+    )
+    def test_pinned_or_lockfile_via_dash_c_allowed_via_full_hook(self, command):
+        rc, stdout, _ = _run_hook(_bash_payload(command))
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+
+class TestAdversarialPayloadVectorsPureFunction:
+    """Vectors beyond the 5 named bypasses, exercised in the round-5
+    self-review: eval, command substitution, and double-nested -c. These
+    confirm the fix is a general "scan any code actually handed to an
+    interpreter" mechanism, not a regex tuned to the 5 named cases."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'eval "pip install requests"',
+            "eval 'npm install lodash'",
+            "$(pip install requests)",
+            "`pip install requests`",
+            # Double-nested -c: bash -> sh -> pip install requests
+            'bash -c "sh -c \\"pip install requests\\""',
+            # -c mixed with an unrelated heredoc elsewhere in the same
+            # command: both must be independently evaluated.
+            'bash -c "npm install lodash" && cat > f.sh <<EOF\nsome text\nEOF\n',
+        ],
+    )
+    def test_adversarial_vector_blocked(self, command):
+        assert bash_introduces_unpinned_dependency(command) is not None, (
+            f"expected {command!r} to be detected as an unpinned install"
+        )
+
+    def test_double_nested_dash_c_pinned_not_blocked(self):
+        command = 'bash -c "sh -c \\"pip install requests==2.31.0\\""'
+        assert bash_introduces_unpinned_dependency(command) is None
+
+    def test_eval_pinned_not_blocked(self):
+        assert bash_introduces_unpinned_dependency('eval "pip install requests==2.31.0"') is None
+
+
+# ---------------------------------------------------------------------------
+# (e7) Round-5 self-review finding: `echo "<text>" | <interpreter>` /
+# `printf "<text>" | <interpreter>` is the same "literal executed text"
+# bug class as the here-string bypass, just spelled with a pipe. Found
+# during the mandatory adversarial self-review (no external reviewer this
+# round), not among the 5 named bypasses — demonstrates the fix generalizes
+# rather than pattern-matching the named cases.
+# ---------------------------------------------------------------------------
+
+
+class TestEchoPrintfPipeBypassPureFunction:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'echo "pip install requests" | bash',
+            'printf "pip install requests" | sh',
+            'echo pip install requests | bash',
+            'echo "npm install lodash" | zsh',
+            'printf "uv add requests" | bash',
+        ],
+    )
+    def test_echo_printf_pipe_to_interpreter_blocked(self, command):
+        assert bash_introduces_unpinned_dependency(command) is not None, (
+            f"expected {command!r} to be detected as an unpinned install"
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'echo "pip install requests==2.31.0" | bash',
+            'echo hi | bash',
+            'printf "just some text" | sh',
+            'echo hi && npm ci',
+            'echo hello or npm install foo',
+        ],
+    )
+    def test_echo_printf_pipe_pinned_or_unrelated_not_blocked(self, command):
+        assert bash_introduces_unpinned_dependency(command) is None
+
+    def test_opaque_producer_piped_to_interpreter_is_a_documented_out_of_scope_gap(self):
+        """`cat <unknown file> | bash` cannot be statically evaluated — the
+        file's contents aren't known ahead of execution. This is a
+        deliberate, disclosed limitation (see module docstring), not a
+        regression: only a *literal* echo/printf argument is staticaly
+        knowable."""
+        assert bash_introduces_unpinned_dependency("cat unknownfile.sh | bash") is None
+
+
+class TestHookEchoPrintfPipeBypassIntegration:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'echo "pip install requests" | bash',
+            'echo pip install requests | bash',
+        ],
+    )
+    def test_echo_printf_pipe_blocked_via_full_hook(self, command):
+        rc, stdout, _ = _run_hook(_bash_payload(command))
+        assert rc == 0
+        assert _is_denied(stdout)
+
+
 class TestHookGracefulHandling:
     @pytest.mark.parametrize("tool_name", ["Read", "Glob", "Grep", "Task", "TodoWrite"])
     def test_non_covered_tool_exits_0_no_deny(self, tool_name):
