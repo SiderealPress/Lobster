@@ -807,6 +807,58 @@ check_claude_process() {
     return 1
 }
 
+#===============================================================================
+# Check: dispatcher PID consistency (issue #2148, Phase 1 — PID ground truth)
+#
+# Additive and observational ONLY — does not replace, gate, or duplicate
+# check_wrapper_process / check_claude_process above, which already
+# independently verify the dispatcher's real liveness via pgrep + tmux-pane
+# ancestry, with no dependency on agent_sessions.db. Per the issue's own
+# scope guidance, the integration point here is reading the same `pid`
+# column session_start() now writes for the dispatcher's own row (recorded
+# via a process-tree walk in inbox_server.py's handle_session_start(), see
+# src/agents/pid_liveness.py), for cross-check consistency with what
+# check_claude_process finds independently — not a parallel reimplementation
+# of liveness detection, and not a rewrite of any of this script's other
+# ~13 checks.
+#
+# Never sets `level` or `restart_reason` — a mismatch here is a signal worth
+# investigating (logged as a warning), not on its own grounds for a restart.
+# Fails open (returns 0, logs and moves on) if the DB or column don't exist
+# yet (pre-migration installs), sqlite3 is unavailable, or the query errors.
+#===============================================================================
+check_dispatcher_pid_consistency() {
+    local db_file="${MESSAGES_DIR}/config/agent_sessions.db"
+    if [[ ! -f "$db_file" ]]; then
+        return 0
+    fi
+
+    local db_pid
+    db_pid=$(sqlite3 "$db_file" \
+        "SELECT pid FROM agent_sessions WHERE agent_type='dispatcher' AND status='running' AND pid IS NOT NULL ORDER BY spawned_at DESC LIMIT 1;" \
+        2>/dev/null)
+
+    if [[ -z "$db_pid" ]]; then
+        log_info "Dispatcher PID consistency: no pid recorded in agent_sessions.db yet (pre-migration row, or dispatcher hasn't re-registered since this deploy) — skipping"
+        return 0
+    fi
+
+    if ! kill -0 "$db_pid" 2>/dev/null; then
+        log_warn "Dispatcher PID consistency: agent_sessions.db reports dispatcher pid $db_pid, but that process is not alive (informational only — check_claude_process above is the authoritative liveness check)"
+        return 0
+    fi
+
+    local claude_pids
+    claude_pids=$(pgrep -x "claude" 2>/dev/null)
+    if echo "$claude_pids" | grep -qw "$db_pid"; then
+        log_info "Dispatcher PID consistency: agent_sessions.db pid $db_pid matches a live 'claude' process — consistent"
+    else
+        log_warn "Dispatcher PID consistency: agent_sessions.db pid $db_pid is alive but is not among the 'claude'-named processes found by pgrep (informational only)"
+    fi
+
+    return 0
+}
+
 # Check if a source is user-facing (should count toward inbox staleness)
 is_user_facing_source() {
     local source="$1"
@@ -1782,6 +1834,9 @@ main() {
         level="RED"
         restart_reason="systemd service not active"
     fi
+
+    # --- Dispatcher PID consistency (issue #2148) — additive, observational only ---
+    check_dispatcher_pid_consistency
 
     # --- Lifecycle-aware Claude checks ---
     #
