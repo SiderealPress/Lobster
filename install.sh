@@ -424,6 +424,20 @@ HOOKEOF
         info "secret-scanner hook already configured"
     fi
 
+    # Block agent-initiated `git push` (Bash tool, no TTY) on the public repo
+    # when the outgoing diff has likely PII/secrets (agent-git-push-guard)
+    chmod +x "$INSTALL_DIR/hooks/agent-git-push-guard.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("agent-git-push-guard"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/agent-git-push-guard.py", "timeout": 15}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "agent-git-push-guard hook installed"
+    else
+        info "agent-git-push-guard hook already configured"
+    fi
+
     # Block `claude -p` inline spawns
     chmod +x "$INSTALL_DIR/hooks/block-claude-p.py" 2>/dev/null || true
     if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("block-claude-p"))' "$_settings" > /dev/null 2>&1; then
@@ -2240,6 +2254,28 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     fi
 else
     info "Skipping secret-scanner hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code PreToolUse hook to block agent-initiated `git push` on the
+# public repo when the outgoing diff has likely PII/secrets (agent-git-push-guard)
+chmod +x "$INSTALL_DIR/hooks/agent-git-push-guard.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("agent-git-push-guard"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Bash",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/agent-git-push-guard.py",
+                "timeout": 15
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "agent-git-push-guard hook installed (block mode)"
+    else
+        info "agent-git-push-guard hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping agent-git-push-guard hook (settings.json not yet created)"
 fi
 
 # Set up Claude Code SessionStart hook to write the dispatcher session ID
