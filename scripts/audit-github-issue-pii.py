@@ -40,6 +40,31 @@ PII pattern provenance:
     new: existing hooks only cover the `chat_id=NNNN` env-var assignment
     form, not IDs embedded in issue prose.
 
+Contributor email exemption (added after issue #563's redaction of
+sayhar@gmail.com was reverted — that address belongs to Sahar Massachi, the
+#1 contributor to this repo by commit count, not a "private individual"):
+  - A known project contributor's email is a *public, attributable*
+    identifier tied to their work on the project (visible in `git log`,
+    commit authorship, and the GitHub contributors list) — categorically
+    different from a private individual's personal email incidentally
+    mentioned in an issue body. Redacting it hides authorship, not PII.
+  - `find_emails`/`find_pii` now accept an `email_allowlist` of exempt
+    addresses (case-insensitive exact match) that are never flagged, in
+    addition to the existing domain-pattern allowlist (noreply addresses,
+    example.com, etc).
+  - `git_contributor_emails()` derives that allowlist automatically and
+    dynamically from `git log --all --format=%ae` in a given repo checkout
+    (a boundary function; isolated and injectable via `run=`, exactly like
+    fetch_issue/apply_body_redaction) — so a contributor's exemption is
+    never a hand-maintained list that goes stale, and instead reflects the
+    actual git history. `--repo-path` controls which checkout to read (the
+    default of --repo may point at a *remote* repo that isn't the local
+    checkout the script runs from).
+  - `load_email_allowlist()`/`parse_email_allowlist()` additionally support
+    a plain-text override file (one email per line, `#` comments, blank
+    lines ignored) for exempting emails that predate or fall outside git
+    history, via `--contributor-emails-file`. Both sources are merged.
+
 Usage:
     python scripts/audit-github-issue-pii.py --repo OWNER/REPO --issue 1866 --dry-run
     python scripts/audit-github-issue-pii.py --repo OWNER/REPO --issue 1866 --issue 563 --apply
@@ -143,10 +168,21 @@ class ProcessResult:
 # ---------------------------------------------------------------------------
 
 
-def find_emails(text: str) -> list[Finding]:
+def find_emails(text: str, email_allowlist: Sequence[str] = ()) -> list[Finding]:
+    """Find email-shaped spans, excluding known-benign and known-contributor
+    addresses.
+
+    `email_allowlist` is compared case-insensitively against the exact
+    matched address (not a substring/domain match) — e.g. a contributor's
+    own address never fires as a finding, but a *different* address at the
+    same domain still does.
+    """
+    exempt = {e.strip().lower() for e in email_allowlist if e.strip()}
     findings = []
     for m in _EMAIL_RE.finditer(text):
         if _EMAIL_ALLOWLIST_RE.search(m.group(0)):
+            continue
+        if m.group(0).lower() in exempt:
             continue
         findings.append(Finding("email", "Email address", m.start(), m.end(), m.group(0)))
     return findings
@@ -231,11 +267,15 @@ def _merge_overlapping(text: str, findings: Sequence[Finding]) -> list[Finding]:
     return merged
 
 
-def find_pii(text: str, name_denylist: Sequence[NameRule] = ()) -> list[Finding]:
+def find_pii(
+    text: str,
+    name_denylist: Sequence[NameRule] = (),
+    email_allowlist: Sequence[str] = (),
+) -> list[Finding]:
     """Pure function: text in, PII findings out. No I/O."""
     findings = [
         *find_names(text, name_denylist),
-        *find_emails(text),
+        *find_emails(text, email_allowlist),
         *find_phones(text),
         *find_chat_ids(text),
     ]
@@ -306,8 +346,66 @@ def load_name_denylist(path: Path) -> list[NameRule]:
 
 
 # ---------------------------------------------------------------------------
+# Contributor email allowlist (static override file + dynamic git-log
+# derivation). Two independently-loadable sources, merged by the caller.
+# ---------------------------------------------------------------------------
+
+
+def parse_email_allowlist(lines: Sequence[str]) -> list[str]:
+    """Parse a plain-text contributor-email override file: one address per
+    line, '#' comments and blank lines ignored. Pure function.
+    """
+    emails = []
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        emails.append(line.lower())
+    return emails
+
+
+def default_contributor_emails_file() -> Path:
+    config_dir = os.environ.get(
+        "LOBSTER_USER_CONFIG_DIR", str(Path.home() / "lobster-user-config")
+    )
+    return Path(config_dir) / "contributor-emails.txt"
+
+
+def load_email_allowlist(path: Path) -> list[str]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return parse_email_allowlist(text.splitlines())
+
+
+# ---------------------------------------------------------------------------
 # Boundary functions (side effects live here, and only here)
 # ---------------------------------------------------------------------------
+
+
+def git_contributor_emails(
+    repo_path: str = ".", run: Callable = subprocess.run
+) -> list[str]:
+    """Derive the set of known-contributor emails from git history itself,
+    rather than a hand-maintained list that inevitably goes stale.
+
+    Read-only (`git log`, no writes). Best-effort: any failure (not a git
+    checkout, `git` missing, etc.) yields an empty list rather than raising,
+    so a missing/foreign checkout degrades to "no dynamic exemptions" instead
+    of crashing the audit run.
+    """
+    try:
+        result = run(
+            ["git", "-C", repo_path, "log", "--all", "--format=%ae"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    emails = {line.strip().lower() for line in result.stdout.splitlines() if line.strip()}
+    return sorted(emails)
 
 
 def _gh_api_json(run: Callable, path: str):
@@ -365,11 +463,13 @@ def process_issue(
     name_denylist: Sequence[NameRule],
     apply: bool,
     run: Callable = subprocess.run,
+    email_allowlist: Sequence[str] = (),
 ) -> ProcessResult:
-    findings = find_pii(issue.body, name_denylist)
+    findings = find_pii(issue.body, name_denylist, email_allowlist)
     redacted_body = redact_text(issue.body, findings)
     comment_findings = [
-        (c.get("id"), find_pii(c.get("body") or "", name_denylist)) for c in issue.comments
+        (c.get("id"), find_pii(c.get("body") or "", name_denylist, email_allowlist))
+        for c in issue.comments
     ]
 
     will_apply = apply and bool(findings)
@@ -455,6 +555,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=str(default_names_file()),
         help="Path to the personal-name denylist file (default: %(default)s).",
     )
+    parser.add_argument(
+        "--contributor-emails-file",
+        default=str(default_contributor_emails_file()),
+        help=(
+            "Path to a static contributor-email exemption file, one address "
+            "per line (default: %(default)s). Merged with emails discovered "
+            "via --repo-path's git history."
+        ),
+    )
+    parser.add_argument(
+        "--repo-path",
+        default=".",
+        help=(
+            "Local git checkout to read contributor emails from (git log "
+            "--all --format=%%ae), for automatic contributor exemption. "
+            "May differ from --repo, which is only the remote issue source. "
+            "Default: current directory."
+        ),
+    )
+    parser.add_argument(
+        "--no-git-contributors",
+        action="store_true",
+        help="Skip deriving contributor emails from git log (static --contributor-emails-file only).",
+    )
     return parser
 
 
@@ -464,9 +588,13 @@ def main(argv: list[str] | None = None) -> int:
 
     denylist = load_name_denylist(Path(args.names_file))
 
+    email_allowlist = set(load_email_allowlist(Path(args.contributor_emails_file)))
+    if not args.no_git_contributors:
+        email_allowlist |= set(git_contributor_emails(args.repo_path))
+
     for issue_number in args.issues:
         issue = fetch_issue(args.repo, issue_number)
-        result = process_issue(issue, denylist, apply=apply)
+        result = process_issue(issue, denylist, apply=apply, email_allowlist=email_allowlist)
         print(format_report(result, apply=apply))
         print()
 

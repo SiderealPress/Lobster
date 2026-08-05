@@ -418,6 +418,115 @@ class TestNameDenylistLoader:
 # ---------------------------------------------------------------------------
 
 
+class TestContributorEmailExemption:
+    """Motivated by issue #563: a redaction run flagged and redacted
+    sayhar@gmail.com — a real address, but one belonging to Sahar Massachi,
+    this repo's #1 contributor by commit count (git log: 3475 commits under
+    that address / its GitHub noreply alias; GitHub contributors API: 1295
+    contributions). That is public attribution, not private-individual PII,
+    and the redaction was reverted. This class proves the tool now excludes
+    known contributor emails by default while still catching a genuine
+    third party's personal email.
+    """
+
+    THIRD_PARTY_EMAIL_BODY = (
+        "## Current Limitation\n\n"
+        "The digest job only fetches issues assigned to Sam by looking up her "
+        "user ID via samplename@gmail.com. This misses two categories of work.\n"
+    )
+
+    CONTRIBUTOR_EMAIL_BODY = (
+        "## Current Limitation\n\n"
+        "The digest job only fetches issues assigned to Alex by looking up her "
+        "user ID via sayhar@gmail.com. This misses two categories of work.\n"
+    )
+
+    def test_contributor_email_is_not_flagged_when_allowlisted(self):
+        findings = audit.find_pii(
+            self.CONTRIBUTOR_EMAIL_BODY,
+            name_denylist=[],
+            email_allowlist=["sayhar@gmail.com"],
+        )
+        assert not any(f.kind == "email" for f in findings)
+
+    def test_third_party_email_is_still_flagged_despite_allowlist(self):
+        # Same allowlist, different (non-contributor) address in the body —
+        # proves the allowlist is a targeted exact-match exemption, not a
+        # blanket "stop scanning emails" switch.
+        findings = audit.find_pii(
+            self.THIRD_PARTY_EMAIL_BODY,
+            name_denylist=[],
+            email_allowlist=["sayhar@gmail.com"],
+        )
+        emails = [f for f in findings if f.kind == "email"]
+        assert len(emails) == 1
+        assert emails[0].text == "samplename@gmail.com"
+
+    def test_contributor_email_allowlist_is_case_insensitive(self):
+        body = self.CONTRIBUTOR_EMAIL_BODY.replace(
+            "sayhar@gmail.com", "SayHar@Gmail.com"
+        )
+        findings = audit.find_pii(
+            body, name_denylist=[], email_allowlist=["sayhar@gmail.com"]
+        )
+        assert not any(f.kind == "email" for f in findings)
+
+    def test_process_issue_does_not_redact_contributor_email(self):
+        # End-to-end through process_issue (the function actually wired to
+        # --apply), not just the pure find_pii layer.
+        issue = audit.IssueContent(
+            repo="octo/example", number=563, body=self.CONTRIBUTOR_EMAIL_BODY, comments=[]
+        )
+        result = audit.process_issue(
+            issue, name_denylist=[], apply=False, email_allowlist=["sayhar@gmail.com"]
+        )
+        assert result.findings == []
+        assert result.redacted_body == self.CONTRIBUTOR_EMAIL_BODY
+        assert "sayhar@gmail.com" in result.redacted_body
+
+
+class TestEmailAllowlistFileLoader:
+    def test_parses_email_lines_ignoring_comments_and_blanks(self):
+        emails = audit.parse_email_allowlist(
+            ["sayhar@gmail.com", "# a comment", "", "Robot.Squad.SM@gmail.com"]
+        )
+        assert emails == ["sayhar@gmail.com", "robot.squad.sm@gmail.com"]
+
+    def test_load_email_allowlist_missing_file_returns_empty(self, tmp_path):
+        missing = tmp_path / "does-not-exist.txt"
+        assert audit.load_email_allowlist(missing) == []
+
+    def test_load_email_allowlist_reads_file(self, tmp_path):
+        f = tmp_path / "contributor-emails.txt"
+        f.write_text("# comment\nsayhar@gmail.com\n")
+        assert audit.load_email_allowlist(f) == ["sayhar@gmail.com"]
+
+
+class TestGitContributorEmails:
+    def test_derives_lowercased_deduped_emails_from_git_log(self):
+        def fake_run(cmd, **kwargs):
+            assert cmd[:3] == ["git", "-C", "some/repo"]
+            assert cmd[3:] == ["log", "--all", "--format=%ae"]
+            return _StubProcess("Sayhar@Gmail.com\nrobot.squad.sm@gmail.com\nsayhar@gmail.com\n")
+
+        emails = audit.git_contributor_emails("some/repo", run=fake_run)
+        assert emails == ["robot.squad.sm@gmail.com", "sayhar@gmail.com"]
+
+    def test_returns_empty_list_on_git_failure_instead_of_raising(self):
+        def failing_run(cmd, **kwargs):
+            raise FileNotFoundError("git not found")
+
+        assert audit.git_contributor_emails("nowhere", run=failing_run) == []
+
+    def test_returns_empty_list_when_git_log_exits_nonzero(self):
+        import subprocess as _subprocess
+
+        def failing_run(cmd, **kwargs):
+            raise _subprocess.CalledProcessError(128, cmd)
+
+        assert audit.git_contributor_emails("not-a-repo", run=failing_run) == []
+
+
 class TestFetchIssue:
     def test_fetch_issue_calls_gh_api_for_body_and_comments(self, monkeypatch):
         import json as _json
