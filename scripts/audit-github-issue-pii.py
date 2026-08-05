@@ -336,8 +336,18 @@ def apply_body_redaction(
     Nothing under --dry-run may call this — enforced by process_issue()
     below and asserted directly by the test suite.
     """
+    # NOTE: this must be -F (--field, "typed" — supports "@-"/"@path" magic
+    # value expansion to read from stdin/file) and NOT -f (--raw-field,
+    # literal string, no expansion). `gh api ... -f body=@-` would set the
+    # issue body to the literal two-character string "@-" instead of reading
+    # the redacted body from stdin. Verified against a live `gh api` call:
+    #   -f text=@-  ->  body becomes the literal string "@-"
+    #   -F text=@-  ->  body becomes the actual stdin content
+    # Regression-tested by test_apply_uses_dash_capital_F_for_body (argv
+    # shape) and test_apply_against_real_gh_shaped_shim_reads_stdin_body
+    # (a fake `gh` shim on PATH exercising the real -f/-F parsing behavior).
     run(
-        ["gh", "api", f"repos/{repo}/issues/{number}", "-X", "PATCH", "-f", "body=@-"],
+        ["gh", "api", f"repos/{repo}/issues/{number}", "-X", "PATCH", "-F", "body=@-"],
         input=new_body,
         capture_output=True,
         text=True,

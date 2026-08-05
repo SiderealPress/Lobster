@@ -24,6 +24,7 @@ the manual --dry-run test against the real repo, never committed here).
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -282,6 +283,102 @@ class TestApplyCallsEditEndpoint:
 
         assert result.applied is False
         assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Regression: `gh api` has two similarly-named flags with very different
+# semantics for the magic "@-"/"@path" stdin/file expansion:
+#   -F / --field      expands "@-" to stdin content (what we want)
+#   -f / --raw-field  treats the value as a LITERAL string — "@-" would
+#                     become the literal two-character body "@-", silently
+#                     destroying the issue body instead of writing the
+#                     redacted text.
+# A prior version of apply_body_redaction used -f, which every existing
+# test missed because they all mock the `run` callable entirely — nothing
+# exercised gh's real flag-parsing semantics. These two tests close that
+# gap: one checks the exact argv shape, the other drives a real subprocess
+# against a `gh`-shaped shim that mirrors gh's actual documented behavior
+# for -f vs -F (verified independently via a live `gh api -X POST /markdown`
+# call: `-f text=@-` renders literally as "@-"; `-F text=@-` renders the
+# real stdin content).
+# ---------------------------------------------------------------------------
+
+
+class TestApplyUsesFieldFlagForBody:
+    def test_apply_uses_dash_capital_F_not_dash_f_for_body(self, monkeypatch):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return _FakeCompletedProcess()
+
+        issue = audit.IssueContent(
+            repo="octo/example", number=1866, body=NAME_AND_CHAT_ID_BODY, comments=[]
+        )
+        audit.process_issue(issue, NAME_DENYLIST, apply=True, run=fake_run)
+
+        assert len(calls) == 1
+        cmd = calls[0]
+        # "-F body=@-" must be present; "-f" must not appear anywhere in the
+        # command (there is nothing else in this call that legitimately
+        # needs --raw-field).
+        assert "-f" not in cmd
+        assert "-F" in cmd
+        f_index = cmd.index("-F")
+        assert cmd[f_index + 1] == "body=@-"
+
+    def test_apply_against_real_gh_shaped_shim_reads_stdin_body(
+        self, monkeypatch, tmp_path
+    ):
+        """Exercise real subprocess + real argv-parsing-shaped behavior,
+        not a mocked `run`. A fake `gh` executable on PATH mirrors gh's
+        actual, verified-live behavior: -F body=@- reads stdin; -f body=@-
+        would yield the literal string "@-". This is the same falsifiability
+        bar as the other core-logic checks, aimed at the boundary function
+        instead of the pure core.
+        """
+        body_output_file = tmp_path / "captured_body.txt"
+
+        shim = tmp_path / "gh"
+        shim.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "flag=\"\"\n"
+            "value=\"\"\n"
+            "prev=\"\"\n"
+            "for arg in \"$@\"; do\n"
+            "    if [[ \"$arg\" == body=* ]]; then\n"
+            "        flag=\"$prev\"\n"
+            "        value=\"${arg#body=}\"\n"
+            "    fi\n"
+            "    prev=\"$arg\"\n"
+            "done\n"
+            "if [[ \"$flag\" == \"-F\" && \"$value\" == \"@-\" ]]; then\n"
+            "    resolved=\"$(cat)\"\n"
+            "elif [[ \"$flag\" == \"-f\" && \"$value\" == \"@-\" ]]; then\n"
+            "    resolved=\"@-\"\n"
+            "else\n"
+            "    resolved=\"$value\"\n"
+            "fi\n"
+            f'printf \'%s\' "$resolved" > "{body_output_file}"\n'
+            "echo '{}'\n"
+        )
+        shim.chmod(0o755)
+
+        monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+
+        redacted_body = audit.redact_text(
+            NAME_AND_CHAT_ID_BODY, audit.find_pii(NAME_AND_CHAT_ID_BODY, NAME_DENYLIST)
+        )
+        audit.apply_body_redaction("octo/example", 1866, redacted_body)
+
+        captured = body_output_file.read_text()
+        # bash's $(cat) command substitution strips trailing newlines, so
+        # compare with trailing newlines normalized; the load-bearing checks
+        # are that the real stdin content made it through at all, and that
+        # it is NOT the literal "@-" that -f would have produced.
+        assert captured.rstrip("\n") == redacted_body.rstrip("\n")
+        assert captured != "@-"
 
 
 # ---------------------------------------------------------------------------
