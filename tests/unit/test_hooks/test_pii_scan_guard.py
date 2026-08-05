@@ -69,6 +69,8 @@ run = _mod.run
 _MAX_DIFF_CHARS = _mod._MAX_DIFF_CHARS
 _EMPTY_TREE_SHA = _mod._EMPTY_TREE_SHA
 _classify_scanner_exception = _mod._classify_scanner_exception
+_summarize_scanner_exception_for_log = _mod._summarize_scanner_exception_for_log
+_redact_secret = _mod._redact_secret
 log_failopen_event = _mod.log_failopen_event
 _CATEGORY_MISSING_API_KEY = _mod._CATEGORY_MISSING_API_KEY
 _CATEGORY_NETWORK_ERROR = _mod._CATEGORY_NETWORK_ERROR
@@ -991,6 +993,55 @@ class TestClassifyScannerException:
         assert _classify_scanner_exception(RuntimeError("500 Internal Server Error")) == _CATEGORY_NETWORK_ERROR
 
 
+class TestSummarizeScannerExceptionForLog:
+    """CodeQL flagged the original fail-open logging as a "clear-text
+    storage of sensitive information" path: the durable log persisted
+    `str(exc)` verbatim, and `exc` can be anything the anthropic SDK or a
+    lower HTTP layer chooses to raise -- including, potentially, request
+    content such as the API key used two lines earlier in
+    `call_scanner_fn(prompt, api_key)`. `_summarize_scanner_exception_for_log`
+    replaces the raw exception text with a fixed-shape "type name + HTTP
+    status" summary that structurally cannot carry that content, rather
+    than trying to scrub an open-ended string after the fact."""
+
+    def test_summary_never_contains_the_original_message_text(self):
+        exc = RuntimeError("connection refused to api.anthropic.com:443, retry exhausted")
+        summary = _summarize_scanner_exception_for_log(exc)
+        assert "connection refused" not in summary
+        assert "api.anthropic.com" not in summary
+        assert summary == "RuntimeError"
+
+    def test_summary_extracts_http_status_when_present(self):
+        exc = RuntimeError("Error code: 401 - {'type': 'error'}")
+        assert _summarize_scanner_exception_for_log(exc) == "RuntimeError (status 401)"
+
+    def test_summary_uses_exception_type_name(self):
+        assert _summarize_scanner_exception_for_log(TimeoutError("scan timed out")) == "TimeoutError"
+
+    def test_summary_never_contains_a_realistic_api_key_embedded_in_message(self):
+        # The exact scenario CodeQL's taint tracker flagged: an exception
+        # message that happens to echo request content, here a
+        # realistic-looking Anthropic API key.
+        fake_key = "sk-ant-api03-totally-fake-not-a-real-secret-1234567890abcdef"
+        exc = RuntimeError(f"request failed; sent header x-api-key: {fake_key}")
+        summary = _summarize_scanner_exception_for_log(exc)
+        assert fake_key not in summary
+
+
+class TestRedactSecret:
+    def test_removes_literal_occurrence_of_secret(self):
+        assert _redact_secret("failed with key sk-ant-abc123", "sk-ant-abc123") == "failed with key [REDACTED]"
+
+    def test_no_op_when_secret_is_none(self):
+        assert _redact_secret("some text", None) == "some text"
+
+    def test_no_op_when_secret_is_empty_string(self):
+        assert _redact_secret("some text", "") == "some text"
+
+    def test_removes_multiple_occurrences(self):
+        assert _redact_secret("k=sk-1 and again sk-1", "sk-1") == "k=[REDACTED] and again [REDACTED]"
+
+
 class TestLogFailopenEvent:
     """Direct coverage of the logging primitive: JSONL record shape and the
     never-raises guarantee."""
@@ -1099,6 +1150,36 @@ class TestRunLogsEachFailOpenReason:
         records = self._read_records(log_path)
         assert len(records) == 1
         assert records[0]["category"] == _CATEGORY_TIMEOUT
+
+    def test_exception_message_containing_api_key_is_not_logged_verbatim(self, git_repo, tmp_path):
+        # Regression test for the CodeQL "clear-text storage of sensitive
+        # information" finding: a scanner-call exception whose message
+        # happens to echo request content (here, a realistic-looking
+        # Anthropic API key) must never reach the durable log verbatim.
+        # `_summarize_scanner_exception_for_log`'s fixed-shape summary
+        # should already prevent this; this test proves the end-to-end
+        # `run()` path, not just the helper in isolation.
+        fake_key = "sk-ant-api03-totally-fake-not-a-real-secret-1234567890abcdef"
+        stdin = self._stdin_for(git_repo)
+        log_path = tmp_path / "failopen.jsonl"
+        code, message = run(
+            stdin, {_ENV_MODE: "block", "ANTHROPIC_API_KEY": fake_key}, str(git_repo),
+            call_scanner_fn=_fake_scanner_raising(
+                RuntimeError(f"connection failed; sent header x-api-key: {fake_key}")
+            ),
+            failopen_log_path=log_path,
+        )
+        assert code == 1
+        records = self._read_records(log_path)
+        assert len(records) == 1
+        assert records[0]["category"] == _CATEGORY_NETWORK_ERROR
+        # The persisted record -- serialized exactly as it was written to
+        # disk -- must not contain the key in any form.
+        assert fake_key not in json.dumps(records[0])
+        # The stderr message shown to the operator at push time is
+        # unchanged/full-detail (not part of this fix's scope -- only the
+        # durable, greppable log is restricted).
+        assert fake_key in message
 
     def test_malformed_response_logs_malformed_response_category(self, git_repo, tmp_path):
         stdin = self._stdin_for(git_repo)

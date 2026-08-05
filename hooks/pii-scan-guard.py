@@ -75,7 +75,14 @@ the developer's terminal at push time -- nothing durable existed to answer
 "has this scanner been a no-op for a week?" This is instrumentation only: it
 does not add alerting or a cron job (the hook is not installed anywhere yet
 as of this writing), it just makes fail-open events visible somewhere that
-could be checked or wired into alerting later.
+could be checked or wired into alerting later. The persisted record never
+contains the raw exception text: exception-derived reasons are logged as a
+fixed-shape "type name + HTTP status" summary
+(_summarize_scanner_exception_for_log), with a literal-value redaction
+backstop (_redact_secret) for the API key wherever it's in scope -- a
+network/timeout/malformed-response failure can otherwise raise or return
+almost anything, and nothing upstream guarantees that content excludes
+request data.
 
 **Model:** the scanner runs on Claude Fable 5 (`claude-fable-5`), not Opus.
 This hook previously ran on Opus, which was shown (see the PR/issue history)
@@ -556,6 +563,57 @@ def _classify_scanner_exception(exc: Exception) -> str:
     return _CATEGORY_NETWORK_ERROR
 
 
+
+# Anchored on a "code"/"status" keyword immediately before the digits so a
+# port number (e.g. "api.anthropic.com:443") is never misread as an HTTP
+# status -- the anthropic SDK's own error strings read "Error code: 401 -
+# ...", which this matches directly.
+_HTTP_STATUS_RE = re.compile(r"(?:code|status)[:\s]+([1-5]\d{2})\b", re.IGNORECASE)
+
+
+def _summarize_scanner_exception_for_log(exc: Exception) -> str:
+    """Produce a fixed-shape, secret-free summary of a scanner exception for
+    the durable fail-open log: the exception's type name, plus an HTTP
+    status code if one appears in the message.
+
+    This deliberately does NOT persist `str(exc)` verbatim. CodeQL flagged
+    the original version of this logging (which wrote `str(exc)` -- via the
+    `reason` string built two lines below `call_scanner_fn(prompt, api_key)`
+    -- straight into the durable JSONL log) as a clear-text-storage-of-
+    sensitive-information path: `exc` can be anything the `anthropic` SDK or
+    a lower HTTP layer chooses to raise, and nothing guarantees that never
+    includes request content (the API key, headers, etc.) -- e.g. a
+    client-side validation error or a debug-mode HTTP dump. A fixed-shape
+    "type name + status" summary carries enough signal to alert/triage on
+    ("the scanner failed N times, mostly TimeoutError") without ever
+    reading (and thus risking persisting) the raw exception text. The
+    caller-facing stderr message (`_scanner_unavailable_result`'s `reason`
+    parameter, printed at push time) is unchanged and still carries the
+    full detail for local operator debugging -- only the durable, greppable
+    log record is restricted to this summary.
+    """
+    name = type(exc).__name__
+    match = _HTTP_STATUS_RE.search(str(exc))
+    if match:
+        return f"{name} (status {match.group(1)})"
+    return name
+
+
+def _redact_secret(text: str, secret: str | None) -> str:
+    """Defense-in-depth backstop: remove any literal occurrence of `secret`
+    (the real API key, when known at the call site) from `text` before it
+    is ever persisted to the durable fail-open log. This is a second,
+    independent layer under _summarize_scanner_exception_for_log -- it
+    covers reasons that were never exception-derived in the first place
+    (e.g. the malformed-response reason, built from the scanner's own
+    response body) on the off chance the key ever ends up embedded there
+    too, and costs nothing when `secret` is falsy (the missing-API-key
+    path, where there is no key to leak)."""
+    if not secret:
+        return text
+    return text.replace(secret, "[REDACTED]")
+
+
 def _default_failopen_log_path(env: dict) -> Path:
     """Resolve the durable fail-open log location from $LOBSTER_WORKSPACE,
     mirroring dispatcher-state-stop.py's _resolve_inflight_path and
@@ -600,6 +658,8 @@ def _scanner_unavailable_result(
     category: str,
     env: dict,
     log_path: Path | str | None = None,
+    log_reason: str | None = None,
+    api_key: str | None = None,
 ) -> tuple[int, str]:
     """Decide the outcome when the scanner itself could not produce a
     verdict at all -- no API key, a network error, a timeout, a malformed
@@ -623,8 +683,23 @@ def _scanner_unavailable_result(
     of mode -- a scanner outage is exactly as invisible in warn mode as in
     block mode, since warn mode's non-blocking behavior only affects the
     push outcome, not whether the outage itself deserves a durable record.
+
+    The persisted log record is never the raw `reason` string verbatim:
+    `log_reason` (a fixed-shape, secret-free summary -- see
+    _summarize_scanner_exception_for_log) is used in its place when the
+    caller supplies one, and -- regardless -- any literal occurrence of
+    `api_key` is stripped as a defense-in-depth backstop (see
+    _redact_secret). `reason` itself, and the stderr message built from it
+    below, are unchanged: the operator still sees full detail at push time,
+    only the durable/greppable log is restricted. See issue #2167 and the
+    CodeQL "clear-text storage of sensitive information" finding on the PR
+    that added this logging in the first place -- `exc` from a scanner
+    failure can be anything the anthropic SDK or a lower HTTP layer raises,
+    with no guarantee it excludes request content (including api_key).
     """
-    log_failopen_event(env=env, category=category, reason=reason, mode=mode, log_path=log_path)
+    raw_log_reason = log_reason if log_reason is not None else reason
+    sanitized_log_reason = _redact_secret(raw_log_reason, api_key)
+    log_failopen_event(env=env, category=category, reason=sanitized_log_reason, mode=mode, log_path=log_path)
     remediation = (
         f"Investigate the scanner error, or set {_ENV_BYPASS}=1 to "
         "deliberately bypass this one push if you've reviewed it yourself."
@@ -706,6 +781,8 @@ def run(
             return _scanner_unavailable_result(
                 mode, f"scanner call failed ({exc})",
                 _classify_scanner_exception(exc), env, failopen_log_path,
+                log_reason=_summarize_scanner_exception_for_log(exc),
+                api_key=api_key,
             )
 
         validated = validate_scanner_response(result)
@@ -720,6 +797,7 @@ def run(
             return _scanner_unavailable_result(
                 mode, f"scanner returned an invalid response ({result!r})",
                 _CATEGORY_MALFORMED_RESPONSE, env, failopen_log_path,
+                api_key=api_key,
             )
         verdict, findings = validated
 
