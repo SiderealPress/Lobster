@@ -569,6 +569,7 @@ def run(
         return 0, ""
 
     all_findings: list[dict] = []
+    any_block_verdict = False
     truncated_any = False
     scanned_anything = False
 
@@ -616,12 +617,24 @@ def run(
         verdict, findings = validated
 
         if verdict == "block":
+            # The verdict itself is what decides block vs allow -- NOT
+            # whether findings happens to be non-empty. validate_scanner_response
+            # accepts {"verdict": "block", "findings": []} (or a "block"
+            # verdict with no "findings" key at all) as a well-formed
+            # response: there is no constraint requiring findings to be
+            # non-empty when the scanner says "block". Round-4 finding: this
+            # flag must be tracked independently of all_findings, because
+            # deciding the outcome later from `if not all_findings` (as the
+            # code used to) silently downgrades an empty-findings "block"
+            # verdict to "allow" -- the exact opposite of what "block" means,
+            # with zero warning to the operator.
+            any_block_verdict = True
             all_findings.extend(findings)
 
     if not scanned_anything:
         return 0, ""
 
-    if not all_findings:
+    if not any_block_verdict:
         if truncated_any:
             return (
                 0,
@@ -630,7 +643,19 @@ def run(
             )
         return 0, ""
 
-    message = format_findings_message(all_findings)
+    if all_findings:
+        message = format_findings_message(all_findings)
+    else:
+        # A "block" verdict with no usable findings details -- still a
+        # block, just without specifics to show. An empty findings list must
+        # never cause this to fall through to exit 0 / an empty message.
+        message = (
+            "BLOCKED: pii-scan-guard scanner flagged this push for review "
+            "but did not provide specific findings details.\n\n"
+            "Investigate manually before proceeding. If this is a "
+            "deliberate, reviewed exception for this one push, set "
+            f"{_ENV_BYPASS}=1."
+        )
     if mode == "warn":
         return 0, f"[pii-scan-guard] WARNING (warn mode, not blocking):\n{message}"
     return 1, message

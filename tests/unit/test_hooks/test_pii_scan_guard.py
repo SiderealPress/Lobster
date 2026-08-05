@@ -725,6 +725,88 @@ class TestRunHandlesMalformedScannerResponse:
         assert "WARNING" in message
 
 
+class TestRunBlockVerdictWithoutFindings:
+    """Round-4 finding: validate_scanner_response accepts
+    {"verdict": "block", "findings": []} -- or a "block" verdict with no
+    "findings" key at all -- as a well-formed response; there is no
+    constraint requiring findings to be non-empty when verdict is "block".
+    Before this fix, run() collected findings via
+    `all_findings.extend(findings)` and then decided the outcome at the very
+    end of the loop with `if not all_findings: return 0, ""`, which silently
+    discarded the "block" verdict itself whenever findings was empty or
+    missing -- returning 0 (allow) with an EMPTY message in block mode. That
+    is the exact opposite of what a "block" verdict means, and it happened
+    with zero warning to the operator. This class proves the verdict itself
+    -- not the presence of findings -- is what decides block vs allow.
+    """
+
+    def _push_a_change(self, git_repo):
+        (git_repo / "a.txt").write_text("v1\n")
+        _run_git(["add", "-A"], git_repo)
+        _run_git(["commit", "-q", "-m", "c1"], git_repo)
+        remote_sha = _git_rev(git_repo)
+        (git_repo / "a.txt").write_text("v2 with content\n")
+        _run_git(["add", "-A"], git_repo)
+        _run_git(["commit", "-q", "-m", "c2"], git_repo)
+        local_sha = _git_rev(git_repo)
+        return remote_sha, local_sha
+
+    def test_block_verdict_with_empty_findings_list_still_blocks(self, git_repo):
+        remote_sha, local_sha = self._push_a_change(git_repo)
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        code, message = run(
+            stdin,
+            {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"},
+            str(git_repo),
+            call_scanner_fn=lambda prompt, key: {"verdict": "block", "findings": []},
+        )
+        assert code == 1
+        assert message.strip() != ""
+
+    def test_block_verdict_with_findings_key_absent_still_blocks(self, git_repo):
+        remote_sha, local_sha = self._push_a_change(git_repo)
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        code, message = run(
+            stdin,
+            {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"},
+            str(git_repo),
+            call_scanner_fn=lambda prompt, key: {"verdict": "block"},
+        )
+        assert code == 1
+        assert message.strip() != ""
+
+    def test_block_verdict_with_empty_findings_still_warns_in_warn_mode(self, git_repo):
+        # Sanity check on the other side of the mode gate: an empty-findings
+        # "block" verdict must still produce a non-blocking WARNING in warn
+        # mode, not silently exit 0 with nothing printed either.
+        remote_sha, local_sha = self._push_a_change(git_repo)
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        code, message = run(
+            stdin,
+            {_ENV_MODE: "warn", "ANTHROPIC_API_KEY": "sk-test-fake"},
+            str(git_repo),
+            call_scanner_fn=lambda prompt, key: {"verdict": "block", "findings": []},
+        )
+        assert code == 0
+        assert "WARNING" in message
+
+    def test_block_verdict_with_populated_findings_still_blocks_no_regression(self, git_repo):
+        # Confirms the round-4 fix does not disturb the original, already-
+        # covered populated-findings block-mode behavior.
+        remote_sha, local_sha = self._push_a_change(git_repo)
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        finding = {"file": "a.txt", "line": 1, "category": "pii", "snippet": "x", "reason": "y"}
+        code, message = run(
+            stdin,
+            {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"},
+            str(git_repo),
+            call_scanner_fn=lambda prompt, key: {"verdict": "block", "findings": [finding]},
+        )
+        assert code == 1
+        assert "BLOCKED" in message
+        assert "a.txt" in message
+
+
 class TestScannerModel:
     def test_scanner_uses_fable_5(self):
         # Regression guard for the model swap: this hook previously ran on
