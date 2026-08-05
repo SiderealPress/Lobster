@@ -108,3 +108,24 @@ SAME already-pinned version, not to whatever a fresh resolve returns.
    process, felt like scope creep with real risk of breaking unrelated
    builds. If the system owner wants the policy extended to those repos, that should be
    a separate, explicit follow-up per repo.
+
+## Pre-existing test suite status (not caused by this PR)
+
+`uv run pytest tests/unit/ --tb=no -q` currently reports **16 pre-existing
+failures** (not 8 — an earlier count in this PR undercounted them), spread
+across **7 files**, none related to dependency pinning:
+
+- `tests/unit/test_bot/test_slack_router_config.py` — 1
+- `tests/unit/test_hooks/test_context_monitor.py` — 1
+- `tests/unit/test_hooks/test_on_compact_write_claude_session_id.py` — 7
+- `tests/unit/test_mcp_server/test_push_calendar_token_endpoint.py` — 2
+- `tests/unit/test_mcp_server/test_push_gmail_token_endpoint.py` — 2
+- `tests/unit/test_mcp_server/test_push_workspace_token_endpoint.py` — 2
+- `tests/unit/test_script_inbox_sources.py` — 1
+
+Confirmed identical (same 16, same files) on both `main` and this branch —
+this PR does not introduce, fix, or otherwise touch any of them. Scope is
+`pytest tests/unit/` per this repo's own Makefile; a literal unscoped `uv
+run pytest --tb=no -q` from repo root additionally produces 43 collection
+errors on both branches, a pre-existing monorepo/subproject
+dependency-isolation issue also unrelated to this PR.

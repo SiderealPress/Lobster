@@ -27,6 +27,12 @@ tree Claude is operating in — not restricted to one directory):
     unrelated text are unlikely because the regex requires the range
     operator to sit immediately inside a quoted value or after a bare
     package-name token, which is the shape of an actual dependency line.
+  - For non-JSON manifests (pyproject.toml / requirements*.txt / Pipfile),
+    whole-line comments (`# ...`) are excluded from the scan first, so prose
+    that merely mentions a range in passing (e.g. `# needs numpy>=1.20
+    installed separately`) is not treated as a dependency declaration. An
+    inline trailing comment on a real dependency line does not suppress
+    detection of that line.
 
 **What triggers a block (Bash):**
   - Any package-manager invocation that can silently resolve to "whatever is
@@ -34,10 +40,25 @@ tree Claude is operating in — not restricted to one directory):
       npm/pnpm/yarn: `install|i|add <pkg>` with no `@<version>` suffix,
                       or `update`/`upgrade`/`up` (any form, with or without
                       a package name)
-      pip:            `install <pkg>` with no `==`, or `-U`/`--upgrade`
+      pip:            `install <pkg>` with no `==`, or `-U`/`--upgrade`,
+                      including via `python -m pip` / `python3 -m pip`
       uv:             `add <pkg>` with no `==`, `sync`/`lock` with
                       `-U`/`--upgrade`/`--upgrade-package`,
-                      `pip install <pkg>` with no `==`
+                      `pip install <pkg>` with no `==`,
+                      `run --with <pkg>` with no `==` (installs an
+                      ephemeral, unpinned dependency for the run)
+  - Detection resolves the actual binary being invoked rather than matching
+    only the literal string "pip"/"npm"/"uv" at position 0: a leading `env`
+    or `command` wrapper, a leading `VAR=val` assignment prefix, and a path
+    prefix on the command itself (`/usr/bin/pip`, `venv/bin/pip`,
+    `node_modules/.bin/npm`) are all normalized away first, so none of these
+    ordinary invocation forms bypass the check.
+  - A compound command is split into sub-commands on real shell separators
+    only (`|`, `;`, `&`, newline) — the bare English words "and"/"or" are
+    NOT treated as separators, since they are not shell operators. Heredoc
+    bodies (`<<EOF ... EOF`) are treated as literal data, not sub-commands,
+    so example install-command *text* embedded in a heredoc's file content
+    does not get independently evaluated as a real invocation.
 
 **What does NOT trigger a block:**
   - `npm install` / `npm ci` / `pnpm install` / `yarn install` with no
@@ -49,6 +70,9 @@ tree Claude is operating in — not restricted to one directory):
     above).
   - Any command or edit that specifies an exact version (`==`, `@1.2.3`,
     or a bare exact version with no operator).
+  - `npm install <local-path>` (e.g. `./local-pkg`, `../sibling`,
+    `/abs/path`) or an already-fully-specified tarball/URL/VCS reference —
+    not a registry resolution that can silently drift to a newer version.
   - Edits to files that are not dependency manifests.
 
 **Deliberately out of scope:** generated lockfiles themselves
@@ -162,6 +186,20 @@ _PY_RANGE_RE = re.compile(
 # requests = "*")
 _STAR_LATEST_RE = re.compile(r'=\s*"(\*|latest)"', re.IGNORECASE)
 
+# A whole-line comment (TOML/requirements.txt style: '#' as the first
+# non-whitespace character on the line). Prose like
+# "# needs numpy>=1.20 installed separately" merely mentions a version range
+# in passing — it is not a dependency declaration, so it must not be scanned.
+# Inline trailing comments (`mcp>=1.0.0  # note`) are left alone: the real
+# declaration earlier on the same line still needs to be caught.
+_FULL_LINE_COMMENT_RE = re.compile(r"^[ \t]*#.*$", re.MULTILINE)
+
+
+def _strip_full_line_comments(text: str) -> str:
+    """Blank out lines that are wholly a comment, preserving line count/
+    offsets (so this is safe to apply before either python-style regex)."""
+    return _FULL_LINE_COMMENT_RE.sub("", text)
+
 
 def _find_unpinned_range_in_package_json(text: str) -> str | None:
     """package.json-specific check. Prefers a real JSON parse (possible when
@@ -208,6 +246,7 @@ def find_unpinned_range(text: str, is_package_json: bool) -> str | None:
     if is_package_json:
         return _find_unpinned_range_in_package_json(text)
 
+    text = _strip_full_line_comments(text)
     m = _PY_RANGE_RE.search(text)
     if m:
         return m.group(0)
@@ -221,8 +260,120 @@ def find_unpinned_range(text: str, is_package_json: bool) -> str | None:
 # Bash command detection
 # ---------------------------------------------------------------------------
 
-# Split a compound shell command into sub-commands on common separators.
-_SUB_CMD_SPLIT_RE = re.compile(r"[|;&\n]|\band\b|\bor\b")
+# Split a compound shell command into sub-commands on REAL shell separators
+# only: pipe, semicolon, background '&' (this also splits '&&'/'||' since
+# each char in the class is matched individually, leaving an empty fragment
+# between them, which is filtered out below), and newline. Deliberately does
+# NOT split on the bare English words "and"/"or" — those are not shell
+# operators (that was a false-positive bug: `echo hello or npm install foo`
+# is a single `echo` invocation with literal args, not two commands).
+_SUB_CMD_SPLIT_RE = re.compile(r"[|;&\n]")
+
+# A heredoc opener, e.g. `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`.
+_HEREDOC_START_RE = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
+
+
+def _mask_heredocs(command: str) -> str:
+    """Blank out heredoc body lines (between a `<<DELIM` marker and the line
+    containing that bare DELIM) before sub-command splitting. A heredoc body
+    is literal data being redirected into a command (e.g. file content for
+    `cat > f.sh <<EOF ... EOF`), not additional shell commands — treating
+    each of its lines as an independent sub-command (as a naive `\\n` split
+    would) causes false positives when the body merely contains example
+    install-command *text*. The line with the opening marker itself (a real
+    command) is preserved; only body lines are blanked, so line offsets and
+    the overall sub-command count elsewhere in the string are unaffected."""
+    lines = command.split("\n")
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        m = _HEREDOC_START_RE.search(line)
+        if m:
+            delim = m.group(2)
+            i += 1
+            while i < len(lines) and lines[i].strip() != delim:
+                out.append("")
+                i += 1
+            if i < len(lines):
+                out.append("")  # blank the closing delimiter line too
+                i += 1
+            continue
+        i += 1
+    return "\n".join(out)
+
+
+# Leading wrapper commands that pass through to a real argv without
+# themselves being the package manager: `env FOO=bar pip install x`,
+# `command npm install x`, or a bare `FOO=bar pip install x` assignment
+# prefix (valid shell syntax with no wrapper word at all). Stripped
+# iteratively so `env command pip install x` also resolves.
+_WRAPPER_WORD_RE = re.compile(r"^(?:env|command)\b\s*")
+_LEADING_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*\s+")
+
+
+def _strip_wrappers(sub: str) -> str:
+    s = sub
+    while True:
+        m = _WRAPPER_WORD_RE.match(s)
+        if m:
+            s = s[m.end():]
+            continue
+        m = _LEADING_ASSIGNMENT_RE.match(s)
+        if m:
+            s = s[m.end():]
+            continue
+        break
+    return s
+
+
+# Resolve the actual binary being invoked rather than pattern-matching only
+# the literal string "pip"/"npm"/"uv" sitting at position 0: a path prefix
+# (`/usr/bin/pip`, `venv/bin/pip`, `node_modules/.bin/npm`) must not defeat
+# detection, since none of that changes what actually runs.
+_FIRST_TOKEN_RE = re.compile(r"^(\s*)(\S+)(.*)$", re.DOTALL)
+
+
+def _normalize_command_name(sub: str) -> str:
+    """If the leading token is a path (contains '/'), replace it with just
+    its basename so path-prefixed invocations are recognized the same as
+    the bare command."""
+    m = _FIRST_TOKEN_RE.match(sub)
+    if not m:
+        return sub
+    lead, token, rest = m.groups()
+    if "/" in token:
+        token = token.rsplit("/", 1)[-1]
+    return f"{lead}{token}{rest}"
+
+
+# `python -m pip install ...` / `python3 -m pip install ...` is one of the
+# most commonly recommended ways to invoke pip and must be treated exactly
+# like a bare `pip install`.
+_PYTHON_DASH_M_PIP_RE = re.compile(
+    r"^(\s*)(python[0-9]*(?:\.[0-9]+)?)\s+-m\s+pip\b(.*)$", re.DOTALL
+)
+
+
+def _normalize_python_dash_m_pip(sub: str) -> str:
+    m = _PYTHON_DASH_M_PIP_RE.match(sub)
+    if not m:
+        return sub
+    lead, _pybin, rest = m.groups()
+    return f"{lead}pip{rest}"
+
+
+def _resolve_subcommand(sub: str) -> str:
+    """Normalize a sub-command so the pattern matchers below see the actual
+    binary/subcommand being invoked, regardless of wrapper prefixes, path
+    prefixes, or the `python -m pip` invocation form."""
+    sub = _strip_wrappers(sub)
+    sub = _normalize_command_name(sub)
+    sub = _normalize_python_dash_m_pip(sub)
+    sub = _normalize_command_name(sub)
+    return sub
+
 
 # npm/pnpm/yarn: install|i|add <pkg-with-no-@version>, or any update/upgrade
 _NODE_INSTALL_RE = re.compile(r"^\s*(npm|pnpm|yarn)\s+(install|i|add)\b(.*)$")
@@ -239,6 +390,14 @@ _UV_SYNC_LOCK_RE = re.compile(r"^\s*uv\s+(sync|lock)\b(.*)$")
 _UV_UPGRADE_FLAG_RE = re.compile(
     r"(^|\s)(-U|--upgrade|--upgrade-package(=\S+)?)(\s|$)"
 )
+
+# uv run --with <pkg> — installs an ephemeral, unpinned dependency for the
+# duration of the run, the same silent-latest risk as `uv add`/`pip install`
+# with no version pin. `--with-requirements <file>` is a different flag
+# (installs from a file, covered by the Edit/Write check on that file) and
+# is deliberately NOT matched here since nothing directly follows "--with".
+_UV_RUN_RE = re.compile(r"^\s*uv\s+run\b(.*)$", re.DOTALL)
+_UV_RUN_WITH_PKG_RE = re.compile(r"--with(?:=|\s+)(\S+)")
 
 
 def _tokens_are_all_flags_or_files(rest: str) -> bool:
@@ -259,6 +418,23 @@ def _node_package_args_unpinned(rest: str) -> list[str]:
     unpinned = []
     for tok in rest.split():
         if tok.startswith("-"):
+            continue
+        # A local filesystem path (`./local-pkg`, `../sibling`, `/abs/path`)
+        # or an already-fully-specified tarball/URL/VCS reference is not a
+        # registry resolution that can silently drift to "latest" — the
+        # exact code is whatever is at that path/URL right now, unaffected
+        # by npm's version-resolution step this hook guards against.
+        if (
+            tok.startswith("./")
+            or tok.startswith("../")
+            or tok.startswith("/")
+            or tok.startswith("~/")
+            or tok.startswith("git+")
+            or tok.startswith("git://")
+            or tok.startswith("http://")
+            or tok.startswith("https://")
+            or tok.endswith((".tgz", ".tar.gz"))
+        ):
             continue
         # scoped or unscoped package name, optionally with @version.
         # e.g. "lodash", "lodash@4.17.21", "@scope/pkg", "@scope/pkg@1.0.0"
@@ -301,44 +477,74 @@ def _pip_uv_package_args_unpinned(rest: str) -> list[str]:
     return unpinned
 
 
+def _uv_run_with_unpinned(rest: str) -> list[str]:
+    """Return `--with` package specs in a `uv run ...` invocation's tail
+    that lack an explicit `==version`."""
+    unpinned = []
+    for m in _UV_RUN_WITH_PKG_RE.finditer(rest):
+        for spec in m.group(1).split(","):
+            spec = spec.strip()
+            if not spec or spec.startswith("-"):
+                continue
+            if "==" in spec:
+                continue
+            if spec.startswith("./") or spec.startswith("../") or spec.startswith("/"):
+                continue
+            unpinned.append(spec)
+    return unpinned
+
+
 def bash_introduces_unpinned_dependency(command: str) -> str | None:
     """Return a description of the offending fragment if `command` could
     silently resolve to a newer-than-pinned dependency version, else None."""
-    for sub in _SUB_CMD_SPLIT_RE.split(command):
-        sub = sub.strip()
-        if not sub:
+    command = _mask_heredocs(command)
+    for raw_sub in _SUB_CMD_SPLIT_RE.split(command):
+        raw_sub = raw_sub.strip()
+        if not raw_sub:
             continue
 
+        # Resolve wrapper/path/`-m pip` forms to the canonical command shape
+        # the pattern matchers below expect, but report the original text
+        # back to the caller so the deny message shows what was actually
+        # typed.
+        sub = _resolve_subcommand(raw_sub)
+
         if _NODE_UPGRADE_RE.search(sub):
-            return sub
+            return raw_sub
 
         m = _NODE_INSTALL_RE.match(sub)
         if m:
             rest = m.group(3)
             unpinned = _node_package_args_unpinned(rest)
             if unpinned:
-                return sub
+                return raw_sub
 
         if _PIP_UPGRADE_FLAG_RE.search(sub) and re.search(r"\bpip3?\b", sub):
-            return sub
+            return raw_sub
 
         m = _PIP_INSTALL_RE.match(sub)
         if m:
             rest = m.group(2)
             unpinned = _pip_uv_package_args_unpinned(rest)
             if unpinned:
-                return sub
+                return raw_sub
 
         m = _UV_ADD_RE.match(sub)
         if m:
             rest = m.group(1)
             unpinned = _pip_uv_package_args_unpinned(rest)
             if unpinned:
-                return sub
+                return raw_sub
 
         m = _UV_SYNC_LOCK_RE.match(sub)
         if m and _UV_UPGRADE_FLAG_RE.search(m.group(2)):
-            return sub
+            return raw_sub
+
+        m = _UV_RUN_RE.match(sub)
+        if m:
+            unpinned = _uv_run_with_unpinned(m.group(1))
+            if unpinned:
+                return raw_sub
 
     return None
 
