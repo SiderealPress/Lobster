@@ -17,6 +17,7 @@ dependencies = [
     "twilio==9.10.3",
     "websockets==16.0",
     "cryptography==46.0.5",
+    "anthropic==0.120.2",
 ]
 
 [project.optional-dependencies]
