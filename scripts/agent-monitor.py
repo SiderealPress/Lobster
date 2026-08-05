@@ -80,6 +80,16 @@ AGENT_OUTPUT_GLOB = _default_agent_output_glob()
 # Pattern for agent JSONL symlink filenames: agent-<hex_id>.jsonl
 AGENT_SYMLINK_PATTERN = re.compile(r"^agent-([0-9a-f]+)\.jsonl$")
 
+# PID ground truth (issue #2148, Phase 1) — shared liveness primitive.
+# agent_sessions.db and this script live in the same repo checkout, so the
+# import path is resolved relative to this file rather than assuming a
+# particular cwd.
+_SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
+from agents.pid_liveness import is_pid_alive  # noqa: E402
+
 # Age threshold for treating an unregistered output file as "active" (minutes)
 UNREGISTERED_ACTIVE_THRESHOLD_MINUTES = 30.0
 
@@ -94,6 +104,8 @@ class AgentRow:
     spawned_at: str
     output_file: str | None
     last_seen_at: str | None
+    pid: int | None = None
+    dispatcher_pid: int | None = None
 
 
 @dataclass(frozen=True)
@@ -238,15 +250,46 @@ def classify(
     output_file_age_minutes: float | None,
     threshold_minutes: float,
     output_file_threshold_minutes: float,
+    pid_alive: bool | None = None,
+    dispatcher_pid_alive: bool | None = None,
 ) -> Classification:
-    """Classify a running agent given age and output file liveness.
+    """Classify a running agent given age, output file liveness, and PID ground truth.
 
-    Logic (all thresholds configurable):
+    PID ground truth (issue #2148, Phase 1) is the PRIMARY signal, taking
+    precedence over the age/output-file heuristics below. Callers precompute
+    pid_alive/dispatcher_pid_alive via agents.pid_liveness.is_pid_alive() and
+    pass plain booleans (or None) here — keeping this function pure/testable
+    without any OS-level calls of its own, exactly like the rest of this
+    module's classification logic.
+
+      - pid_alive is not None (a real pid was recorded for this row): the
+        real OS process's existence is definitive. HEALTHY if alive,
+        GHOST_CONFIRMED if not — regardless of age or output_file mtime.
+      - pid_alive is None and dispatcher_pid_alive is False: no pid of its
+        own (an in-process Agent-tool subagent), but its parent dispatcher
+        process is confirmed dead — the subagent is necessarily dead too.
+        GHOST_CONFIRMED.
+      - pid_alive is None and dispatcher_pid_alive is True: the dispatcher
+        being alive does NOT prove this particular subagent is still
+        active (the dispatcher process running says nothing about any one
+        in-process conversation thread) — falls through to the existing
+        heuristics below, unchanged.
+      - Both None (pre-migration row, or no real process boundary exists):
+        falls through to the existing heuristics below, byte-for-byte
+        unchanged from pre-#2148 behavior.
+
+    Legacy heuristic (all thresholds configurable):
       - age < threshold             → HEALTHY (too young to worry about)
       - age >= threshold, no file   → STALE_NO_FILE (can't check liveness)
       - age >= threshold, file recent → GHOST_SUSPECTED (still writing, maybe slow)
       - age >= threshold, file old/missing → GHOST_CONFIRMED (likely dead)
     """
+    if pid_alive is not None:
+        return "HEALTHY" if pid_alive else "GHOST_CONFIRMED"
+
+    if dispatcher_pid_alive is not None and not dispatcher_pid_alive:
+        return "GHOST_CONFIRMED"
+
     if age_minutes < threshold_minutes:
         return "HEALTHY"
 
@@ -272,7 +315,23 @@ def classify_agent(
 ) -> ClassifiedAgent:
     age = compute_age_minutes(row.spawned_at, now)
     file_age = compute_output_file_age_minutes(row.output_file, now)
-    label = classify(age, row.output_file, file_age, threshold_minutes, output_file_threshold_minutes)
+
+    # PID ground truth (issue #2148) — resolve real-process liveness here,
+    # at the one OS-facing boundary, so classify() itself stays pure.
+    pid_alive: bool | None = is_pid_alive(row.pid) if row.pid is not None else None
+    dispatcher_pid_alive: bool | None = (
+        is_pid_alive(row.dispatcher_pid) if row.dispatcher_pid is not None else None
+    )
+
+    label = classify(
+        age,
+        row.output_file,
+        file_age,
+        threshold_minutes,
+        output_file_threshold_minutes,
+        pid_alive=pid_alive,
+        dispatcher_pid_alive=dispatcher_pid_alive,
+    )
     return ClassifiedAgent(
         row=row,
         classification=label,
@@ -384,7 +443,7 @@ def load_running_agents(db_path: Path) -> list[AgentRow]:
         rows = conn.execute(
             """
             SELECT id, task_id, description, chat_id, status,
-                   spawned_at, output_file, last_seen_at
+                   spawned_at, output_file, last_seen_at, pid, dispatcher_pid
             FROM agent_sessions
             WHERE status IN ('running', 'starting')
             ORDER BY spawned_at ASC
@@ -403,6 +462,8 @@ def load_running_agents(db_path: Path) -> list[AgentRow]:
             spawned_at=row["spawned_at"],
             output_file=row["output_file"],
             last_seen_at=row["last_seen_at"],
+            pid=row["pid"],
+            dispatcher_pid=row["dispatcher_pid"],
         )
         for row in rows
     ]

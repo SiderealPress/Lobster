@@ -95,6 +95,9 @@ from agents.tracker import add_pending_agent as _add_pending_agent, remove_pendi
 # Agent session store — SQLite-backed, used directly for new MCP tools
 import agents.session_store as _session_store
 
+# PID ground truth (issue #2148, Phase 1) — dispatcher self-registration capture
+from agents.pid_liveness import find_dispatcher_ancestor_pid as _find_dispatcher_ancestor_pid
+
 # Atomic claim DB — SQLite INSERT OR FAIL claim gate (issue #1360)
 from claims import AtomicClaimDB as _AtomicClaimDB
 
@@ -7957,6 +7960,24 @@ async def handle_session_start(args: dict) -> list[TextContent]:
         except (TypeError, ValueError):
             timeout_minutes = None
 
+    # PID ground truth (issue #2148, Phase 1) — dispatcher self-registration.
+    # handle_session_start() executes inside the stdio `lobster-inbox` MCP
+    # server child process (spawned by the `claude` binary per .mcp.json),
+    # which is NOT the same OS PID as the dispatcher's own `claude` process.
+    # A flat os.getpid() here would record the MCP server child's PID, not
+    # the dispatcher's — so we walk the process tree to the nearest ancestor
+    # process named "claude" instead (same technique hooks/session_role.py
+    # already uses to detect dispatcher sessions). Best-effort: any failure
+    # (missing /proc, no "claude" ancestor found) yields pid=None, which
+    # falls back to the pre-migration heuristics untouched — registration
+    # must never be blocked by a PID-capture failure.
+    dispatcher_pid: int | None = None
+    if agent_type == "dispatcher":
+        try:
+            dispatcher_pid = _find_dispatcher_ancestor_pid()
+        except Exception:  # noqa: BLE001
+            dispatcher_pid = None
+
     try:
         _session_store.session_start(
             id=agent_id,
@@ -7973,6 +7994,7 @@ async def handle_session_start(args: dict) -> list[TextContent]:
             trigger_snippet=trigger_snippet,
             idempotency=idempotency,
             task_origin=task_origin,
+            pid=dispatcher_pid,
         )
     except Exception as exc:
         log.error(f"session_start failed: {exc}", exc_info=True)
