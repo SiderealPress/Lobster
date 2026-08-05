@@ -136,7 +136,10 @@ COMPACTION_CAUSE_WINDOW_SECONDS = 300  # 5 minutes
 # Dispatcher session start timestamp file (issue #2059).
 # Written by this hook on every dispatcher SessionStart as a plain Unix epoch
 # integer (seconds). Read by health-check-v3.sh to compute session age and
-# trigger a proactive restart before the hard 7440s CC session lifetime limit.
+# trigger a proactive restart at ~7200s. NOTE: this is an operational
+# precaution, not a response to a confirmed Claude Code limit — the original
+# justification (issue #2059/PR #2060) rested on only 2 observed data points
+# and was never verified against Anthropic documentation (see issue #2157).
 # Override via env var for test isolation.
 DISPATCHER_SESSION_START_FILE = Path(
     os.environ.get(
@@ -257,8 +260,10 @@ def _write_dispatcher_session_start() -> None:
     """Write the current Unix epoch to DISPATCHER_SESSION_START_FILE.
 
     Called once per dispatcher SessionStart. The health check reads this file
-    to compute session age and trigger a proactive restart before the hard
-    7440s CC session lifetime limit (issue #2059).
+    to compute session age and trigger a proactive restart at ~7200s as an
+    operational precaution (issue #2059). The original justification for this
+    threshold was weakly evidenced and never confirmed against Anthropic
+    documentation — see issue #2157.
 
     Uses an atomic rename so the reader never sees a partial write.
     Silent on any error — must never crash the hook.
@@ -439,7 +444,9 @@ def main() -> None:
         )
         # Record session start time for health-check proactive restart (issue #2059).
         # Plain Unix epoch written atomically; health-check-v3.sh reads it to detect
-        # sessions approaching the 7440s CC hard limit and send SIGTERM early.
+        # sessions approaching the ~7200s proactive-restart threshold and send
+        # SIGTERM early. This threshold is an operational precaution, not a
+        # confirmed CC-enforced limit — see issue #2157.
         _write_dispatcher_session_start()
         print(
             f"[{HOOK_NAME}] wrote dispatcher session start timestamp",
