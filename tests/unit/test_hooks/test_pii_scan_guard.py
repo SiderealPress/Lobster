@@ -531,6 +531,44 @@ class TestRunScanDecisions:
         assert "failing closed" in message
         assert "scan timed out" in message
 
+    def test_unexpected_verdict_value_fails_closed_in_block_mode(self, git_repo):
+        # A response that parses as valid JSON but carries a "verdict" value
+        # other than "block"/"allow" (e.g. a schema drift, a model returning
+        # "unsure" or "unknown", or any other unexpected string) is a scanner
+        # failure just as much as a raised exception or a missing API key --
+        # NOT the same as "allow". Before this test existed, run() only
+        # checked `result.get("verdict") == "block"` to decide whether to
+        # collect findings, which meant any non-"block" verdict -- including
+        # garbage -- silently fell through to "allow", defeating fail-closed
+        # for this one failure mode.
+        remote_sha, local_sha = self._push_a_change(git_repo)
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        code, message = run(
+            stdin,
+            {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"},
+            str(git_repo),
+            call_scanner_fn=_fake_scanner_returning("unsure"),
+        )
+        assert code == 1
+        assert "BLOCKED" in message
+        assert "failing closed" in message
+        assert "unsure" in message
+
+    def test_unexpected_verdict_value_in_warn_mode_does_not_block(self, git_repo):
+        # Mirrors the missing-api-key / scanner-exception warn-mode tests
+        # above: warn mode stays passive-only even for this failure mode.
+        remote_sha, local_sha = self._push_a_change(git_repo)
+        stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+        code, message = run(
+            stdin,
+            {_ENV_MODE: "warn", "ANTHROPIC_API_KEY": "sk-test-fake"},
+            str(git_repo),
+            call_scanner_fn=_fake_scanner_returning("unsure"),
+        )
+        assert code == 0
+        assert "WARNING" in message
+        assert "unsure" in message
+
     def test_missing_api_key_in_warn_mode_does_not_block(self, git_repo, monkeypatch):
         # warn mode's whole purpose is passive observation before an
         # operator opts into enforcement -- a scanner outage there must

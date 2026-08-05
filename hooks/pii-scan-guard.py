@@ -409,10 +409,15 @@ def _load_system_prompt() -> str:
 
 
 def call_scanner(user_prompt: str, api_key: str) -> dict:
-    """Call the Opus scanner and return the parsed verdict dict. Raises on
+    """Call the Fable 5 scanner and return the parsed verdict dict. Raises on
     any failure (network, timeout, malformed response) — callers must catch
-    and fail open; this function does not itself decide what "no scan" means
-    for the push."""
+    and treat that as a scanner failure (fails closed in block mode, warns in
+    warn mode — see run()'s _scanner_unavailable_result); this function does
+    not itself decide what "no scan" means for the push. Note that raising is
+    not the only failure shape callers must guard against: a call that
+    returns valid JSON with a "verdict" value other than "block"/"allow" is
+    just as much a scanner failure as an exception, and run() treats it the
+    same way."""
     import anthropic  # imported lazily: pure-function tests never need this
 
     client = anthropic.Anthropic(api_key=api_key, timeout=_SCAN_TIMEOUT_SECONDS)
@@ -559,7 +564,19 @@ def run(
         except Exception as exc:  # noqa: BLE001 - any scanner failure fails closed
             return _scanner_unavailable_result(mode, f"scanner call failed ({exc})")
 
-        if result.get("verdict") == "block":
+        verdict = result.get("verdict")
+        if verdict not in ("block", "allow"):
+            # A response that parses as JSON but carries neither expected
+            # verdict string is just as much "the scanner did not produce a
+            # usable answer" as a raised exception -- treating it as "allow"
+            # here would silently defeat fail-closed for this one failure
+            # mode. Route it through the same _scanner_unavailable_result
+            # path (fails closed in block mode, warns in warn mode).
+            return _scanner_unavailable_result(
+                mode, f"scanner returned an unexpected verdict ({verdict!r})"
+            )
+
+        if verdict == "block":
             all_findings.extend(result.get("findings", []))
 
     if not scanned_anything:

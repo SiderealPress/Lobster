@@ -5,7 +5,9 @@
 # Installs hooks/pii-scan-guard.py as the `.git/hooks/pre-push` hook in a
 # target repository, so every `git push` from that repo — however it is
 # invoked (a plain terminal, a script, an IDE, or a Claude Code Bash tool
-# call) — runs the Opus-backed PII scan.
+# call) — runs the Fable-5-backed PII scan (fails closed in block mode if
+# the scanner itself cannot produce a verdict — see hooks/pii-scan-guard.py's
+# module docstring for the full fail-closed rationale).
 #
 # Usage:
 #   scripts/install-pii-scan-hook.sh [target-repo-path]
