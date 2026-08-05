@@ -136,6 +136,18 @@ def test_doc_file_is_skipped():
     assert findings == []
 
 
+def test_doc_file_still_scans_for_secrets():
+    """Doc files are exempt from PII/instance/name checks (examples and
+    placeholders are legitimate doc content) but NOT from SECURITY_PATTERNS --
+    a real secret pasted into a doc file is still a leak. This mirrors the
+    fix for #2160, where a real Telegram bot token sat undetected in
+    docs/DOCKER-TESTING.md for months because the old .githooks/pre-push
+    exemption covered secrets too. If this regresses, a real secret pasted
+    into any .md/.txt/.rst/.adoc file would silently bypass the guard."""
+    findings, _ = gps.scan_diff(_diff("docs/DOCKER-TESTING.md", ['AWS_KEY = "AKIAABCDEFGHIJKLMNOP"']))
+    assert any(f.description == "AWS Access Key ID" for f in findings)
+
+
 def test_githooks_dir_is_skipped():
     # The hook files themselves legitimately contain these patterns as regex source.
     findings, _ = gps.scan_diff(_diff(".githooks/pre-push", ['ssn@@\\b\\d{3}-\\d{2}-\\d{4}\\b@@SSN']))
