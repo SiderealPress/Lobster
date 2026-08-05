@@ -1,10 +1,13 @@
 """
 Unit tests for _write_dispatcher_session_start() in inject-bootup-context.py.
 
-Issue #2059: CC enforces a hard 7440s session lifetime. inject-bootup-context.py
-now writes a plain Unix epoch timestamp to dispatcher-session-start.ts on every
-dispatcher SessionStart so health-check-v3.sh can compute session age and send
-SIGTERM before the hard limit.
+Issue #2059: inject-bootup-context.py writes a plain Unix epoch timestamp to
+dispatcher-session-start.ts on every dispatcher SessionStart so
+health-check-v3.sh can compute session age and send SIGTERM at
+SESSION_AGE_LIMIT_SECONDS (~7200s) as an operational precaution. NOTE: the
+original justification for this threshold — that Claude Code enforces a hard
+7440s session lifetime — was based on only 2 observed data points and was
+never confirmed against Anthropic documentation. See issue #2157.
 
 Tests cover:
 - _write_dispatcher_session_start() writes a valid Unix epoch to the file

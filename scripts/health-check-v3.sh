@@ -109,13 +109,15 @@ HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"   # legacy WFM-touch signa
 DISPATCHER_HEARTBEAT_FILE="${LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-heartbeat}"
 DISPATCHER_HEARTBEAT_STALE_SECONDS=1200   # 20 min — covers compaction (~5m) + catchup (~12m) + margin
 
-# Session age limit: CC enforces a hard 7440s session lifetime (issue #2059).
-# At this limit, CC kills the process without firing the Stop hook — no tombstone,
-# no compaction alert. We trigger a graceful SIGTERM at SESSION_AGE_LIMIT_SECONDS
-# (7200s = 2 min before hard limit) so the Stop hook fires cleanly.
+# Session age limit (issue #2059): we proactively SIGTERM the dispatcher at
+# SESSION_AGE_LIMIT_SECONDS (7200s) as an operational precaution against
+# sessions dying uncleanly (no Stop hook, no tombstone, no compaction alert)
+# around that age. NOTE: the original justification for 7440s as a
+# CC-enforced hard limit rested on only 2 observed data points and was never
+# confirmed against Anthropic documentation — see issue #2157. Treat this as
+# a precautionary restart, not evidence of a confirmed CC session limit.
 # Written by inject-bootup-context.py as a plain Unix epoch integer.
-# Set LOBSTER_SESSION_AGE_LIMIT_SECONDS=0 in config.env to disable this check
-# (safe if CC no longer enforces the 7440s hard limit in the installed version).
+# Set LOBSTER_SESSION_AGE_LIMIT_SECONDS=0 in config.env to disable this check.
 SESSION_AGE_LIMIT_SECONDS="${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-7200}"
 DISPATCHER_SESSION_START_FILE="${LOBSTER_DISPATCHER_SESSION_START_FILE_OVERRIDE:-$WORKSPACE_DIR/data/dispatcher-session-start.ts}"
 
@@ -1345,14 +1347,18 @@ except Exception as e:
 }
 
 #===============================================================================
-# Session Age Check — proactive restart before the 7440s CC hard limit
+# Session Age Check — proactive restart at SESSION_AGE_LIMIT_SECONDS
 # (issue #2059)
 #
-# CC enforces a hard 7440-second (124-minute) session lifetime. When this limit
-# is hit, CC exits without firing the Stop hook — no tombstone, no compact-
-# catchup. To avoid this, we send SIGTERM to the dispatcher process at
-# SESSION_AGE_LIMIT_SECONDS (7200s = 2 min before the limit), which fires the
-# Stop hook cleanly.
+# We send SIGTERM to the dispatcher process at SESSION_AGE_LIMIT_SECONDS
+# (7200s) as an operational precaution, so the Stop hook fires cleanly instead
+# of risking an uncleanly-terminated session (no tombstone, no compact-
+# catchup) around that age. NOTE: issue #2059's original justification —
+# that Claude Code enforces a hard 7440-second session lifetime — was based
+# on only 2 observed data points and was never confirmed against Anthropic
+# documentation of any such limit. See issue #2157 for the reassessment.
+# This restart is kept as a precaution; its value does not depend on the
+# original "hard limit" claim being true.
 #
 # Unlike do_restart() (which uses systemctl), this sends SIGTERM directly to the
 # claude process so the Stop hook fires. The claude-persistent.sh wrapper detects
@@ -1369,8 +1375,8 @@ except Exception as e:
 #===============================================================================
 check_session_age() {
     # Support SESSION_AGE_LIMIT_SECONDS=0 as an explicit disable signal.
-    # Use this when CC no longer enforces the 7440s hard session limit and
-    # the proactive restarts are causing unnecessary disruption.
+    # Use this when the proactive restarts are causing unnecessary disruption
+    # and are not needed for this install.
     if [[ "$SESSION_AGE_LIMIT_SECONDS" -eq 0 ]]; then
         log_info "Session age: check disabled (SESSION_AGE_LIMIT_SECONDS=0)"
         return 0
@@ -1427,7 +1433,7 @@ check_session_age() {
     # even if the session exits immediately once SIGTERM is delivered — if the
     # alert were sent after kill -TERM, a fast process death could drop it
     # entirely. Text is plain-language (a planned restart, not a crash), not
-    # internal state (PID, session age, hard-limit seconds) — the previous
+    # internal state (PID, session age, restart-threshold seconds) — the previous
     # wording gave the user no way to distinguish a graceful restart from a
     # health-check kill or OOM crash. Still gated on LOBSTER_DEBUG (2026-06-14
     # noise-reduction change) — this fix only corrects ordering and wording for
@@ -1813,7 +1819,7 @@ main() {
         boot_grace=true
     fi
 
-    # --- Session age check: proactive restart before 7440s CC hard limit ---
+    # --- Session age check: proactive restart at SESSION_AGE_LIMIT_SECONDS ---
     # Suppressed during boot grace: a session that just started cannot be near
     # the limit, and a stale timestamp from a crashed previous session could
     # cause a false SIGTERM during the new session's first minutes.
