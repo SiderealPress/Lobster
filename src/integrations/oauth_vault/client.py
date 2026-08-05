@@ -379,12 +379,13 @@ def get_valid_token(
         )
         return None
 
-    # Merge: preserve scope and refresh_token from the stored token
+    # Merge: preserve scope, refresh_token, and email from the stored token
     refreshed = TokenData(
         access_token=refreshed_partial.access_token,
         expires_at=refreshed_partial.expires_at,
         scope=token.scope,                  # preserve original scope
         refresh_token=token.refresh_token,  # Google doesn't return new refresh_token here
+        email=token.email,                  # preserve identity metadata across refresh
     )
 
     _save_token(user_id, refreshed, effective_token_dir)

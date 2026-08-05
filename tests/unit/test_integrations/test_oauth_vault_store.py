@@ -255,3 +255,55 @@ class TestProviderTokenDir:
         a = provider_token_dir("provider_a", vault_root=tmp_path)
         b = provider_token_dir("provider_b", vault_root=tmp_path)
         assert a != b
+
+
+# ---------------------------------------------------------------------------
+# Identity metadata (issue #2153) -- email captured at grant time survives
+# save/load, consistently with the three predecessor token_store.py modules.
+# ---------------------------------------------------------------------------
+
+
+class TestEmailIdentityMetadata:
+    def test_roundtrip_preserves_email(self, tmp_path):
+        token = TokenData(
+            access_token="tok",
+            expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
+            scope="s",
+            refresh_token="r",
+            email="account-a@example.com",
+        )
+        save_token("chat_a", token, tmp_path)
+        loaded = load_token("chat_a", tmp_path)
+        assert loaded.email == "account-a@example.com"
+
+    def test_missing_email_key_loads_as_none(self, tmp_path):
+        (tmp_path / "legacy_user.json").write_text(
+            json.dumps(
+                {
+                    "access_token": "tok",
+                    "expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc).isoformat(),
+                    "scope": "s",
+                    "refresh_token": "r",
+                }
+            )
+        )
+        loaded = load_token("legacy_user", tmp_path)
+        assert loaded is not None
+        assert loaded.email is None
+
+    def test_two_chat_ids_store_independent_emails(self, tmp_path):
+        """The exact scenario from the production incident: two different
+        chat_ids must each retain their OWN email, with no cross-contamination."""
+        token_a = TokenData(
+            access_token="tok-a", expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
+            scope="s", refresh_token="r", email="account-a@example.com",
+        )
+        token_b = TokenData(
+            access_token="tok-b", expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
+            scope="s", refresh_token="r", email="account-b@example.com",
+        )
+        save_token("1111111111", token_a, tmp_path)
+        save_token("2222222222", token_b, tmp_path)
+
+        assert load_token("1111111111", tmp_path).email == "account-a@example.com"
+        assert load_token("2222222222", tmp_path).email == "account-b@example.com"

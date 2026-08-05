@@ -425,3 +425,31 @@ class TestRefreshTokenViaProxy:
     def test_raises_for_unknown_provider(self) -> None:
         with pytest.raises(ValueError, match="Unknown oauth_vault provider"):
             ovc._refresh_token_via_proxy("not_a_real_provider", "refresh-tok")
+
+
+# ---------------------------------------------------------------------------
+# Identity metadata (issue #2153) -- email is preserved across a refresh,
+# consistently with the three predecessor token_store.py modules'
+# get_valid_token behavior.
+# ---------------------------------------------------------------------------
+
+
+class TestEmailIdentityMetadata:
+    def test_email_preserved_across_refresh(self, tmp_path: Path) -> None:
+        expired = TokenData(
+            access_token=_FAKE_ACCESS_TOKEN,
+            expires_at=_EXPIRED_EXPIRES,
+            scope=_FAKE_SCOPE,
+            refresh_token=_FAKE_REFRESH_TOKEN,
+            email="account-a@example.com",
+        )
+        save_token("user1", expired, tmp_path)
+
+        proxy_result = TokenData(
+            access_token="ya29.refreshed", expires_at=_FUTURE_EXPIRES, scope="", refresh_token=None,
+        )
+        with patch(f"{ovc.__name__}._refresh_token_via_proxy", return_value=proxy_result):
+            result = get_valid_token(_PROVIDER, "user1", token_dir=tmp_path)
+
+        assert result.email == "account-a@example.com"
+        assert load_token("user1", tmp_path).email == "account-a@example.com"

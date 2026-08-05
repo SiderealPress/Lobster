@@ -70,12 +70,20 @@ class TokenData:
         refresh_token: Long-lived credential used to obtain new access tokens.
                        May be None when refreshing (Google only sends it on
                        first authorisation or when prompt=consent is used).
+        email:         The Google account email that granted this token,
+                       captured via the userinfo endpoint at grant time (see
+                       integrations.google_auth.identity.fetch_authenticated_email).
+                       None for tokens saved before this field existed, or if
+                       the userinfo call failed/was not attempted (issue #2153
+                       -- storing this is what lets a cross-account mixup be
+                       detected instead of staying silent).
     """
 
     access_token: str
     expires_at: datetime
     scope: str
     refresh_token: Optional[str] = None
+    email: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
