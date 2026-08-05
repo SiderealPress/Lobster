@@ -63,6 +63,22 @@ tree Claude is operating in — not restricted to one directory):
     (`bash <<EOF`, `sh <<EOF`, `zsh <<EOF`, `ssh host <<EOF`, `cat <<EOF |
     bash`, etc.), in which case the body genuinely executes as shell code and
     is still scanned line-by-line for real install invocations.
+  - Any code string that is actually handed to an interpreter for execution
+    is recursively scanned with these same rules, no matter how it is
+    embedded in the outer command: a shell/interpreter's `-c "<code>"` (or
+    `-c '<code>'`) argument (`bash -c "pip install requests"`, including
+    nested through wrapper commands like `docker exec bash -c "..."` or
+    `sudo bash -c "..."`, and double-nested like `bash -c "sh -c \"...\""`),
+    a here-string body (`bash <<< "pip install requests"`), an `eval
+    "<code>"` argument, `$(...)`/backtick command substitution, and a
+    literal `echo "<text>" | <interpreter>` / `printf "<text>" | <interpreter>`
+    pipe. These are genuinely-executed code, unlike a heredoc's inert
+    file-content body (`cat > f.sh <<EOF`) — the distinction that matters is
+    whether the text is handed to an interpreter to run, not merely the
+    syntax used to embed it. Deliberately NOT covered, and not coverable by
+    any static text scan: piping an *opaque* producer into a shell (`cat
+    unknown-file | bash`, `curl url | bash`) — the risk there is unknown
+    runtime content, not a shell-syntax gap.
 
 **What does NOT trigger a block:**
   - `npm install` / `npm ci` / `pnpm install` / `yarn install` with no
@@ -345,6 +361,129 @@ def _mask_heredocs(command: str) -> str:
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------------------
+# Recursive scanning of code payloads handed directly to an interpreter for
+# execution: `-c "<code>"`, here-strings (`<<<`), `eval "<code>"`, and
+# `$(...)`/backtick command substitution.
+#
+# Round 5 bypass (independent review, PR #2151, issuecomment-5187771322):
+# `bash -c "pip install requests"` and `bash <<< "pip install requests"` were
+# both silently ALLOWED. Root cause: `_HEREDOC_START_RE` never matches a
+# here-string (`<<<` is not `<<`), and `-c "<code>"` never enters heredoc
+# handling at all — the whole thing is one sub-command starting with
+# `bash`/`sh`/`zsh`, so the quoted code string inside is never independently
+# scanned by the install-detection regexes below (which are anchored at
+# sub-command start, not applied recursively to quoted string arguments).
+#
+# Fix: before the existing sub-command-split logic runs, pull out every code
+# string that is genuinely handed to an interpreter for execution — a `-c`
+# argument, a here-string body, an `eval` argument, or a `$(...)`/backtick
+# substitution — and recursively run this same detection on each one. This
+# is intentionally a search (not an anchored match) so the interpreter
+# invocation can appear anywhere in the command (`docker exec bash -c "..."`,
+# `sudo bash -c "..."`), and it is intentionally recursive so nested forms
+# (`bash -c "sh -c \"pip install requests\""`) resolve one layer at a time:
+# each recursive call unescapes one level of quoting and re-scans, so the
+# innermost real command is what ultimately gets matched against the
+# install-detection regexes.
+# ---------------------------------------------------------------------------
+
+_INTERPRETER_ALT = r"(?:bash|sh|zsh|ksh|dash|python[0-9.]*)"
+
+# `<interpreter> [flags] -c "<code>"` / `-c '<code>'`, wherever it appears in
+# the command (not anchored) so wrapper commands (`docker exec`, `sudo`,
+# `ssh host`, etc.) preceding the interpreter don't hide it. The closing
+# quote must not be escaped (`(?<!\\)`), so a nested/escaped quote inside the
+# code (`bash -c "sh -c \"...\""`) is not mistaken for the end of the string.
+_DASH_C_PAYLOAD_RE = re.compile(
+    r"(?:^|[\s;|&()])(?:[\w./\-]*/)?" + _INTERPRETER_ALT + r"\b"
+    r"(?:\s+-{1,2}[A-Za-z][\w-]*)*"
+    r"\s+-c\s+"
+    r"(['\"])(.*?)(?<!\\)\1",
+    re.DOTALL,
+)
+
+# `<interpreter> ... <<< "<code>"` / `<<< '<code>'` / `<<< bareword` — a
+# here-string, whose body is a real argument fed to the interpreter's stdin,
+# not inert heredoc file content.
+_HERE_STRING_PAYLOAD_RE = re.compile(
+    r"(?:^|[\s;|&()])(?:[\w./\-]*/)?" + _INTERPRETER_ALT + r"\b"
+    r"[^\n<]*?<<<\s*"
+    r"(?:(['\"])(.*?)(?<!\\)\1|(\S+))",
+    re.DOTALL,
+)
+
+# `eval "<code>"` / `eval '<code>'` — eval always executes its argument.
+_EVAL_PAYLOAD_RE = re.compile(
+    r"(?:^|[\s;|&(])eval\s+(['\"])(.*?)(?<!\\)\1",
+    re.DOTALL,
+)
+
+# `$(<code>)` / `` `<code>` `` command substitution. Non-greedy: this hook is
+# a heuristic regex scan (see module docstring), not a shell parser, so
+# balanced/nested parens inside `$(...)` are out of scope — realistic
+# single-level substitutions are what this guards against.
+_CMD_SUBST_RE = re.compile(r"\$\((.*?)\)", re.DOTALL)
+_BACKTICK_RE = re.compile(r"`([^`]*)`", re.DOTALL)
+
+# `echo "<text>" | <interpreter>` / `printf "<text>" | <interpreter>` — a
+# literal string produced by echo/printf and piped straight into a shell is
+# executed exactly like a here-string (`<<< "<text>"`); it is the same bug
+# class as the round-5 bypass, just spelled with a pipe instead of `<<<`.
+# Deliberately narrow: only a literal quoted/bareword argument to echo/printf
+# is statically knowable. A producer whose output can't be known ahead of
+# execution (`cat somefile | bash`, `curl url | bash`) is NOT — and cannot
+# be made — coverable by this or any other static text scan, since the
+# actual danger is in unknown-until-runtime content, not in shell syntax
+# this hook failed to parse. That gap is a disclosed, inherent limitation
+# of static analysis (see module docstring), not a bug in this regex.
+_ECHO_PRINTF_PIPE_RE = re.compile(
+    r"(?:^|[\s;|&])(?:echo|printf)\s+(?:-\S+\s+)*"
+    r"(?:(['\"])(.*?)(?<!\\)\1|([^|]+?))"
+    r"\s*\|\s*(?:[\w./\-]*/)?" + _INTERPRETER_ALT + r"\b",
+    re.DOTALL,
+)
+
+
+def _unescape_shell_quotes(s: str) -> str:
+    """Undo one level of `\\"` / `\\'` escaping, so a payload extracted from
+    inside an outer quoted string (e.g. the inner `sh -c \\"...\\"` of
+    `bash -c "sh -c \\"...\\""`) can be re-scanned by the same regexes on
+    the next recursive call as if it were typed directly."""
+    return s.replace('\\"', '"').replace("\\'", "'")
+
+
+def _extract_executed_payloads(command: str) -> list[str]:
+    """Return every code string in `command` that is actually handed to an
+    interpreter/eval/subshell for execution — as opposed to inert heredoc
+    file content — so the caller can recursively scan each one."""
+    payloads: list[str] = []
+    for m in _DASH_C_PAYLOAD_RE.finditer(command):
+        payloads.append(_unescape_shell_quotes(m.group(2)))
+    for m in _HERE_STRING_PAYLOAD_RE.finditer(command):
+        code = m.group(2) if m.group(2) is not None else m.group(3)
+        if code:
+            payloads.append(_unescape_shell_quotes(code))
+    for m in _EVAL_PAYLOAD_RE.finditer(command):
+        payloads.append(_unescape_shell_quotes(m.group(2)))
+    for m in _CMD_SUBST_RE.finditer(command):
+        payloads.append(m.group(1))
+    for m in _BACKTICK_RE.finditer(command):
+        payloads.append(m.group(1))
+    for m in _ECHO_PRINTF_PIPE_RE.finditer(command):
+        code = m.group(2) if m.group(2) is not None else m.group(3)
+        if code:
+            payloads.append(_unescape_shell_quotes(code.strip()))
+    return payloads
+
+
+# Recursion guard: each recursive call operates on a strictly shorter payload
+# extracted from inside its parent's quoting, so real input always
+# terminates quickly — this bound only protects against a pathological
+# edge case, not normal nesting depths.
+_MAX_PAYLOAD_RECURSION_DEPTH = 8
+
+
 # Leading wrapper commands that pass through to a real argv without
 # themselves being the package manager: `env FOO=bar pip install x`,
 # `command npm install x`, or a bare `FOO=bar pip install x` assignment
@@ -535,9 +674,21 @@ def _uv_run_with_unpinned(rest: str) -> list[str]:
     return unpinned
 
 
-def bash_introduces_unpinned_dependency(command: str) -> str | None:
+def bash_introduces_unpinned_dependency(command: str, _depth: int = 0) -> str | None:
     """Return a description of the offending fragment if `command` could
-    silently resolve to a newer-than-pinned dependency version, else None."""
+    silently resolve to a newer-than-pinned dependency version, else None.
+
+    Before the sub-command split below, recursively scan every code payload
+    that is genuinely handed to an interpreter for execution (a `-c`
+    argument, a here-string body, an `eval` argument, or `$(...)`/backtick
+    command substitution) — see the "Recursive scanning of code payloads"
+    section above for why this is necessary and how it terminates."""
+    if _depth <= _MAX_PAYLOAD_RECURSION_DEPTH:
+        for payload in _extract_executed_payloads(command):
+            found = bash_introduces_unpinned_dependency(payload, _depth + 1)
+            if found:
+                return found
+
     command = _mask_heredocs(command)
     for raw_sub in _SUB_CMD_SPLIT_RE.split(command):
         raw_sub = raw_sub.strip()
