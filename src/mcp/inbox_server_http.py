@@ -741,6 +741,90 @@ def _fetch_workspace_preview(chat_id: str) -> Optional[str]:
     return f"Recently modified in My Drive: {latest.name}"
 
 
+# ---------------------------------------------------------------------------
+# Issue #2153: identity metadata capture, shared by all three push endpoints
+# ---------------------------------------------------------------------------
+# A signed session token (see _verify_calendar_session_token and friends,
+# above) proves a push corresponds to the OAuth transaction requested by a
+# given chat_id. It does NOT prove that the Google account which completed
+# the consent screen belongs to the person who owns that chat_id -- a shared
+# or forwarded consent link, clicked with a different Google account active
+# in the browser, produces exactly that mismatch. Capturing which email
+# actually authenticated, and comparing it to what was on file before, is
+# what lets this surface immediately instead of silently (the production
+# incident that prompted this issue: chat_id 1111111111's Workspace token
+# turned out to be authenticated as a different person's Google account,
+# undetected until an explicit API call revealed it).
+
+
+def _fetch_authenticated_email(access_token: str) -> Optional[str]:
+    """Lazily-imported wrapper around identity.fetch_authenticated_email.
+
+    Kept as a thin module-level function (rather than a top-level import)
+    to match this module's existing convention of importing `integrations.*`
+    lazily inside functions (see _fetch_calendar_preview et al., above) --
+    and to remain patchable by name in tests
+    (`patch(f"{_MODULE}._fetch_authenticated_email")`).
+    """
+    from integrations.google_auth.identity import fetch_authenticated_email
+
+    return fetch_authenticated_email(access_token)
+
+
+def _read_previous_token_email(token_path: Path) -> Optional[str]:
+    """Best-effort read of the `email` field from an existing token file.
+
+    Returns None on any failure (file absent, corrupt JSON, no email key) --
+    this is a baseline for a self-consistency check, never a hard dependency.
+    Must be called BEFORE the token file at `token_path` is overwritten.
+    """
+    if not token_path.exists():
+        return None
+    try:
+        data = json.loads(token_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    email = data.get("email")
+    return email if isinstance(email, str) and email else None
+
+
+def _capture_identity_metadata(
+    *,
+    chat_id: str,
+    access_token: str,
+    token_path: Path,
+    scope_label: str,
+) -> tuple[Optional[str], str]:
+    """Fetch the newly granted email, compare it to what's on file, and
+    return ``(new_email, warning_suffix)``.
+
+    ``warning_suffix`` is either "" (nothing to warn about -- match, or
+    nothing to compare against yet) or a short string to append to the
+    push confirmation text sent to the user, so a mismatch is surfaced in
+    the same message that tells them the connection succeeded, rather than
+    staying silent. Never raises: a userinfo failure degrades to
+    ``(None, "")``, and the token is still saved/usable.
+    """
+    from integrations.google_auth.identity import (
+        check_identity_consistency,
+        format_mismatch_warning,
+    )
+
+    previous_email = _read_previous_token_email(token_path)
+    new_email = _fetch_authenticated_email(access_token)
+
+    result = check_identity_consistency(previous_email, new_email)
+    if result.is_mismatch:
+        logger.warning(
+            "%s token identity mismatch for chat_id=%r: previously authenticated "
+            "as %r, now authenticated as %r -- possible cross-account mixup "
+            "(issue #2153). Token was still saved; investigate before trusting it.",
+            scope_label, chat_id, previous_email, new_email,
+        )
+
+    return new_email, format_mismatch_warning(result, chat_id=chat_id) or ""
+
+
 async def push_calendar_token_endpoint(scope, receive, send):
     """POST /api/push-calendar-token — receive a token pushed by myownlobster.ai.
 
@@ -839,16 +923,28 @@ async def push_calendar_token_endpoint(scope, receive, send):
         await response(scope, receive, send)
         return
 
+    _GCAL_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+    token_path = _GCAL_TOKEN_DIR / f"{safe_chat_id}.json"
+
+    # Issue #2153: capture the authenticated email BEFORE overwriting any
+    # existing token file, so the self-consistency check has the true prior
+    # value to compare against.
+    new_email, identity_warning = _capture_identity_metadata(
+        chat_id=safe_chat_id,
+        access_token=access_token,
+        token_path=token_path,
+        scope_label="Calendar",
+    )
+
     token_data = {
         "access_token": access_token,
         "expires_at": expires_at.isoformat(),
         "scope": scope_str,
         "refresh_token": refresh_token,
+        "email": new_email,
     }
 
     try:
-        _GCAL_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
-        token_path = _GCAL_TOKEN_DIR / f"{safe_chat_id}.json"
         tmp_path = token_path.with_suffix(".json.tmp")
         payload = json.dumps(token_data, indent=2)
         fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _TOKEN_FILE_MODE)
@@ -875,6 +971,7 @@ async def push_calendar_token_endpoint(scope, receive, send):
         connected_text=(
             "Google Calendar connected. "
             "I can now read and create events on your calendar."
+            f"{identity_warning}"
         ),
         fetch_preview=lambda: _fetch_calendar_preview(safe_chat_id),
         source=confirm_source,
@@ -1076,16 +1173,28 @@ async def push_gmail_token_endpoint(scope, receive, send):
         await response(scope, receive, send)
         return
 
+    _GMAIL_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+    token_path = _GMAIL_TOKEN_DIR / f"{safe_chat_id}.json"
+
+    # Issue #2153: capture the authenticated email BEFORE overwriting any
+    # existing token file, so the self-consistency check has the true prior
+    # value to compare against.
+    new_email, identity_warning = _capture_identity_metadata(
+        chat_id=safe_chat_id,
+        access_token=access_token,
+        token_path=token_path,
+        scope_label="Gmail",
+    )
+
     token_data = {
         "access_token": access_token,
         "expires_at": expires_at.isoformat(),
         "scope": scope_str,
         "refresh_token": refresh_token,
+        "email": new_email,
     }
 
     try:
-        _GMAIL_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
-        token_path = _GMAIL_TOKEN_DIR / f"{safe_chat_id}.json"
         tmp_path = token_path.with_suffix(".json.tmp")
         payload = json.dumps(token_data, indent=2)
         fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _TOKEN_FILE_MODE)
@@ -1114,6 +1223,7 @@ async def push_gmail_token_endpoint(scope, receive, send):
         connected_text=(
             "Gmail connected. "
             "I can now read and search your emails."
+            f"{identity_warning}"
         ),
         fetch_preview=lambda: _fetch_gmail_preview(safe_chat_id),
     )
@@ -1568,16 +1678,31 @@ async def push_workspace_token_endpoint(scope, receive, send):
         await response(scope, receive, send)
         return
 
+    _WORKSPACE_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+    token_path = _WORKSPACE_TOKEN_DIR / f"{safe_chat_id}.json"
+
+    # Issue #2153: capture the authenticated email BEFORE overwriting any
+    # existing token file, so the self-consistency check has the true prior
+    # value to compare against. This is the exact code path that let the
+    # production cross-account mixup (chat_id 1111111111 holding a different
+    # person's Workspace token) go undetected until an explicit API call
+    # revealed it.
+    new_email, identity_warning = _capture_identity_metadata(
+        chat_id=safe_chat_id,
+        access_token=access_token,
+        token_path=token_path,
+        scope_label="Workspace",
+    )
+
     token_data = {
         "access_token": access_token,
         "expires_at": expires_at.isoformat(),
         "scope": scope_str,
         "refresh_token": refresh_token,
+        "email": new_email,
     }
 
     try:
-        _WORKSPACE_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
-        token_path = _WORKSPACE_TOKEN_DIR / f"{safe_chat_id}.json"
         tmp_path = token_path.with_suffix(".json.tmp")
         payload = json.dumps(token_data, indent=2)
         fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _TOKEN_FILE_MODE)
@@ -1608,6 +1733,7 @@ async def push_workspace_token_endpoint(scope, receive, send):
         connected_text=(
             "Google Workspace connected. "
             "You can now use /gdocs, /gdrive, and /gsheets."
+            f"{identity_warning}"
         ),
         fetch_preview=lambda: _fetch_workspace_preview(safe_chat_id),
     )
