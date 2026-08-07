@@ -90,8 +90,28 @@ if _SRC_DIR not in sys.path:
 
 from agents.pid_liveness import is_pid_alive  # noqa: E402
 
+# Dispatcher-exclusion: single source of truth (issue #2176; see
+# docs/engineering-lessons-learned.md "Dispatcher exclusion" entry for the
+# full history — issue #781, PR #2099, PR #2103 all fixed the same missing
+# exclusion at a different call site that scans agent_sessions. This is the
+# 5th occurrence: PR #2148/#2152's PID-ground-truth classification path in
+# classify() below can return GHOST_CONFIRMED for the dispatcher's own row
+# (which never had a real PID boundary issue before — output_file=NULL
+# structurally routed it to STALE_NO_FILE under the legacy heuristic only).
+# Applying the exclusion here, at the query boundary, mirrors
+# session_store.cleanup_stale_running_sessions()'s query exactly and removes
+# the dispatcher's row from this script's pipeline entirely — it never
+# reaches classify_agent(), so no PID-staleness race window can misclassify
+# it, regardless of restart timing.
+from utils.agent_types import DISPATCHER_EXCLUSION_SQL, is_dispatcher_agent_type  # noqa: E402
+
 # Age threshold for treating an unregistered output file as "active" (minutes)
 UNREGISTERED_ACTIVE_THRESHOLD_MINUTES = 30.0
+
+# The static agent_id used when the dispatcher registers itself via session_start().
+# Matches the value used in the dispatcher bootup instructions:
+#   session_start(agent_id="lobster-dispatcher", agent_type="dispatcher", ...)
+_DISPATCHER_AGENT_ID = "lobster-dispatcher"
 
 
 @dataclass(frozen=True)
@@ -106,6 +126,29 @@ class AgentRow:
     last_seen_at: str | None
     pid: int | None = None
     dispatcher_pid: int | None = None
+    agent_type: str | None = None
+
+
+def _is_dispatcher_agent(row: AgentRow) -> bool:
+    """True if `row` represents the dispatcher's own live session (issue #2176).
+
+    Checked two ways, either sufficient:
+      1. agent_type == 'dispatcher' (utils.agent_types.is_dispatcher_agent_type) —
+         the structural signal, present on any row read via load_running_agents(),
+         which already excludes these at the query boundary via
+         DISPATCHER_EXCLUSION_SQL. In normal operation this branch never fires
+         because such rows never reach this function.
+      2. agent_id == 'lobster-dispatcher' (the static agent_id constant) —
+         belt-and-suspenders for call sites that build a ClassifiedAgent/AgentRow
+         directly (tests, or any future caller bypassing load_running_agents())
+         without populating agent_type.
+
+    Used by both mark_failed_all_ghosts() and send_alert() so neither can act on
+    or report the dispatcher's own row, regardless of which classification path
+    (GHOST_CONFIRMED via PID ground truth, or STALE_NO_FILE via the legacy
+    heuristic) produced it.
+    """
+    return is_dispatcher_agent_type(row.agent_type) or row.agent_id == _DISPATCHER_AGENT_ID
 
 
 @dataclass(frozen=True)
@@ -436,16 +479,26 @@ def load_running_agents(db_path: Path) -> list[AgentRow]:
     those rows should never accumulate, but any historical 'starting' rows
     (from before the fix) will be caught and ghost-detected here rather than
     silently leaking forever.
+
+    Excludes the dispatcher's own row (agent_type='dispatcher') at this query
+    boundary via DISPATCHER_EXCLUSION_SQL — see the module-level comment above
+    the import for why (issue #2176). This is a structural exclusion, not a
+    downstream filter: the dispatcher's row never enters `classified`,
+    `confirmed`, or `stale_no_file`, so neither send_alert() nor
+    mark_failed_all_ghosts() can ever act on it, regardless of what PID or
+    output_file state it happens to be in when this query runs.
     """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT id, task_id, description, chat_id, status,
-                   spawned_at, output_file, last_seen_at, pid, dispatcher_pid
+                   spawned_at, output_file, last_seen_at, pid, dispatcher_pid,
+                   agent_type
             FROM agent_sessions
             WHERE status IN ('running', 'starting')
+              AND {DISPATCHER_EXCLUSION_SQL}
             ORDER BY spawned_at ASC
             """
         ).fetchall()
@@ -464,6 +517,7 @@ def load_running_agents(db_path: Path) -> list[AgentRow]:
             last_seen_at=row["last_seen_at"],
             pid=row["pid"],
             dispatcher_pid=row["dispatcher_pid"],
+            agent_type=row["agent_type"],
         )
         for row in rows
     ]
@@ -614,6 +668,14 @@ def send_alert(
     report: str,
 ) -> None:
     """Send Telegram alert if GHOST_CONFIRMED or UNREGISTERED agents found."""
+    # Dispatcher-exclusion guard (issue #2176): unlike mark_failed_all_ghosts(),
+    # this function previously had NO dispatcher guard on either classification
+    # path — a second, independently-exploitable route to the same false
+    # "ghost-kill" alert even after load_running_agents() excludes the row at
+    # the query boundary for any caller that (like tests, or a future call
+    # site) builds `confirmed` by hand rather than via that query.
+    confirmed = [a for a in confirmed if not _is_dispatcher_agent(a.row)]
+
     if not confirmed and not unregistered:
         return
 
@@ -856,12 +918,6 @@ def mark_failed_unregistered(agent: UnregisteredAgent) -> None:
     print(f"  [mark-failed] Notification queued for unregistered agent {agent.agent_id[:16]}...")
 
 
-# The static agent_id used when the dispatcher registers itself via session_start().
-# This constant is the same value used in the dispatcher bootup instructions:
-#   session_start(agent_id="lobster-dispatcher", agent_type="dispatcher", ...)
-_DISPATCHER_AGENT_ID = "lobster-dispatcher"
-
-
 def mark_failed_all_ghosts(
     confirmed: list[ClassifiedAgent],
     db_path: Path,
@@ -872,25 +928,38 @@ def mark_failed_all_ghosts(
     Also marks STALE_NO_FILE agents as failed when provided. These sessions have
     no output_file recorded, so liveness cannot be checked — on a fresh restart
     any session older than the threshold is safe to treat as dead and mark failed.
-    Dispatcher sessions always land in STALE_NO_FILE (they are long-running processes
-    that never register an output file), which is why --mark-failed would previously
-    leave stale dispatcher sessions in status=running indefinitely.
+    Dispatcher sessions previously always landed in STALE_NO_FILE (they are
+    long-running processes that never register an output file); as of PR #2152
+    they can also land in GHOST_CONFIRMED via the PID ground-truth path. Both
+    lists are guarded here — see _is_dispatcher_agent() (issue #2176).
 
-    The live dispatcher session is always excluded from the STALE_NO_FILE sweep.
-    The dispatcher registers with the static agent_id "lobster-dispatcher", so any
-    entry with that agent_id is skipped unconditionally — it is the currently-running
-    dispatcher, not a dead subagent.
+    As of issue #2176, load_running_agents() already excludes every dispatcher
+    row (agent_type='dispatcher') at the query boundary, so in practice neither
+    `confirmed` nor `stale_no_file` can contain one any more — these filters are
+    kept as a second, independent layer of defense (belt-and-suspenders) rather
+    than removed, since this function is also reachable with a hand-built list
+    in tests and by any future caller that doesn't route through
+    load_running_agents().
     """
     stale_no_file = stale_no_file or []
 
-    # Guard: exclude the live dispatcher session from the sweep.
-    # The dispatcher always registers with agent_id=_DISPATCHER_AGENT_ID (a static
-    # constant), so we filter on that directly.  There is no UUID file to read —
+    # Guard: exclude the live dispatcher session from the sweep, on both the
+    # GHOST_CONFIRMED and STALE_NO_FILE lists. There is no UUID file to read —
     # the previous approach compared against the Claude UUID from
     # dispatcher-claude-session-id, but that UUID is stored in a different field
     # and was never equal to agent_id, making the guard a silent no-op.
+    if confirmed:
+        filtered_confirmed = [a for a in confirmed if not _is_dispatcher_agent(a.row)]
+        skipped_confirmed = len(confirmed) - len(filtered_confirmed)
+        if skipped_confirmed:
+            print(
+                f"\n  [mark-failed] Skipping {skipped_confirmed} GHOST_CONFIRMED session(s) with "
+                f"agent_id={_DISPATCHER_AGENT_ID!r} — live dispatcher, not a dead subagent."
+            )
+        confirmed = filtered_confirmed
+
     if stale_no_file:
-        filtered_stale = [a for a in stale_no_file if a.row.agent_id != _DISPATCHER_AGENT_ID]
+        filtered_stale = [a for a in stale_no_file if not _is_dispatcher_agent(a.row)]
         skipped = len(stale_no_file) - len(filtered_stale)
         if skipped:
             print(
