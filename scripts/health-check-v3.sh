@@ -1327,21 +1327,30 @@ clear_stale_inbox_markers() {
 
 # Returns the count of currently-running subagent sessions from agent_sessions.db.
 # Returns 0 if the database doesn't exist or cannot be read (fail-open: allow restart).
+#
+# Excludes the dispatcher's own row (issue #2176, found as a byproduct of the
+# ghost-kill regression investigation — pre-existing, NOT caused by PR #2152,
+# and predates DISPATCHER_EXCLUSION_SQL/this bug class's other fixes by ~1700+
+# commits). The dispatcher's own row is always status='running' for its entire
+# lifetime, so before this fix the count here structurally always included at
+# least 1 for the dispatcher itself — meaning the SUBAGENT GUARD in do_restart()
+# (`if [[ "$active_subagents" -gt 0 ]]`) would defer every RED-state restart
+# indefinitely whenever the dispatcher's row was present, regardless of whether
+# any real subagent was actually running. DISPATCHER_EXCLUSION_SQL is the shared
+# single source of truth (scripts/lib/agent_sessions.sh; see #781 / PR #2099 /
+# PR #2103 / issue #2176 for the history of this filter being reinvented
+# independently at each call site before consolidation) — must match
+# DISPATCHER_EXCLUSION_SQL in src/utils/agent_types.py.
 count_active_subagents() {
     local db_file="${MESSAGES_DIR}/config/agent_sessions.db"
     if [[ ! -f "$db_file" ]]; then
         echo "0"
         return
     fi
-    uv run python3 -c "
-import sqlite3, sys
-try:
-    conn = sqlite3.connect('$db_file')
-    row = conn.execute(\"SELECT COUNT(*) FROM agent_sessions WHERE status='running'\").fetchone()
-    print(row[0] if row else 0)
-except Exception as e:
-    print(0)
-" 2>/dev/null || echo "0"
+    source "${LOBSTER_INSTALL_DIR:-$HOME/lobster}/scripts/lib/agent_sessions.sh"
+    sqlite3 "$db_file" \
+        "SELECT COUNT(*) FROM agent_sessions WHERE status='running' AND ${DISPATCHER_EXCLUSION_SQL}" \
+        2>/dev/null || echo "0"
 }
 
 #===============================================================================
