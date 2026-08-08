@@ -1398,8 +1398,9 @@ class TestEnqueueRecoveryNotification:
     _write_synthetic_inbox_message (in require-write-result.py) and
     _enqueue_recovery_notification (in inbox_server.py). These tests verify
     that the marker correctly identifies the boundary, that content after it
-    is used as the notification summary, and that the no-content fallback
-    works when the marker is absent.
+    is used as the notification summary, and — per issue #2175 — that the
+    owner-facing Telegram notification is suppressed entirely when the marker
+    is absent (i.e. nothing was salvaged from the transcript).
     """
 
     def _call_enqueue(self, inbox_dir: Path, msg: dict, owner_chat_id: int = 99999) -> dict:
@@ -1471,8 +1472,22 @@ class TestEnqueueRecoveryNotification:
         # The full 400-char content should not appear verbatim.
         assert long_content not in notification["text"]
 
-    def test_no_summary_marker_uses_fallback(self, tmp_path):
-        """When text does not contain the summary marker, fallback message is used."""
+    def _call_enqueue_expect_no_file(self, inbox_dir: Path, msg: dict, owner_chat_id: int = 99999) -> None:
+        """Call _enqueue_recovery_notification and assert no notification file was written."""
+        from src.mcp.inbox_server import _enqueue_recovery_notification
+
+        with patch("src.mcp.inbox_server._get_owner_chat_id_and_source", return_value=(owner_chat_id, "telegram")), \
+             patch.multiple("src.mcp.inbox_server", INBOX_DIR=inbox_dir):
+            _enqueue_recovery_notification(msg)
+
+        assert list(inbox_dir.glob("*.json")) == []
+
+    def test_no_summary_marker_suppresses_notification(self, tmp_path):
+        """When text does not contain the summary marker (nothing salvaged), no
+        owner-facing Telegram notification is written — see issue #2175: this exact
+        shape ("(No recoverable transcript content found.)") was the entire content
+        of a ~140-notification overnight spam incident.
+        """
         inbox_dir = tmp_path / "inbox"
         inbox_dir.mkdir()
 
@@ -1480,20 +1495,36 @@ class TestEnqueueRecoveryNotification:
             "task_id": "agent-no-content",
             "text": "Agent exited without calling write_result.\n\n(No recoverable transcript content found.)",
         }
-        notification = self._call_enqueue(inbox_dir, msg)
+        self._call_enqueue_expect_no_file(inbox_dir, msg)
 
-        assert "No recoverable transcript content was found." in notification["text"]
-        assert "Last known activity:" not in notification["text"]
-
-    def test_empty_text_uses_fallback(self, tmp_path):
-        """Empty text field (no transcript content at all) uses the fallback message."""
+    def test_empty_text_suppresses_notification(self, tmp_path):
+        """Empty text field (no transcript content at all) suppresses the notification."""
         inbox_dir = tmp_path / "inbox"
         inbox_dir.mkdir()
 
         msg = {"task_id": "agent-empty", "text": ""}
+        self._call_enqueue_expect_no_file(inbox_dir, msg)
+
+    def test_salvaged_content_still_sends_notification(self, tmp_path):
+        """When the transcript salvage is non-empty (real work was in flight when the
+        agent died without calling write_result), the owner-facing notification is
+        still sent — this is the case that represents genuinely lost work.
+        """
+        inbox_dir = tmp_path / "inbox"
+        inbox_dir.mkdir()
+
+        msg = {
+            "task_id": "agent-real-work",
+            "text": (
+                "Agent exited without calling write_result."
+                "\n\nRecovered content:\n\n"
+                "Drafted the fix for issue #99 and was about to open a PR."
+            ),
+        }
         notification = self._call_enqueue(inbox_dir, msg)
 
-        assert "No recoverable transcript content was found." in notification["text"]
+        assert notification["type"] == "subagent_notification"
+        assert "Drafted the fix for issue #99" in notification["text"]
 
     def test_notification_uses_owner_chat_id(self, tmp_path):
         """Recovery notification is addressed to the owner, not to chat_id=0."""
@@ -1501,21 +1532,31 @@ class TestEnqueueRecoveryNotification:
         inbox_dir.mkdir()
 
         owner_id = 123456789
-        msg = {"task_id": "agent-chat", "text": ""}
+        msg = {
+            "task_id": "agent-chat",
+            "text": "Preamble.\n\nRecovered content:\n\nSomething real happened.",
+        }
         notification = self._call_enqueue(inbox_dir, msg, owner_chat_id=owner_id)
 
         assert notification["chat_id"] == owner_id
         assert notification["type"] == "subagent_notification"
 
     def test_owner_chat_id_none_skips_notification(self, tmp_path):
-        """When owner chat_id cannot be resolved, no notification file is written."""
+        """When owner chat_id cannot be resolved, no notification file is written —
+        even when there is salvaged content to report (distinct from the issue #2175
+        empty-content suppression, which returns before owner chat_id is even resolved).
+        """
         inbox_dir = tmp_path / "inbox"
         inbox_dir.mkdir()
 
         from src.mcp.inbox_server import _enqueue_recovery_notification
 
+        msg = {
+            "task_id": "x",
+            "text": "Preamble.\n\nRecovered content:\n\nSomething real happened.",
+        }
         with patch("src.mcp.inbox_server._get_owner_chat_id_and_source", return_value=(None, "telegram")), \
              patch.multiple("src.mcp.inbox_server", INBOX_DIR=inbox_dir):
-            _enqueue_recovery_notification({"task_id": "x", "text": ""})
+            _enqueue_recovery_notification(msg)
 
         assert list(inbox_dir.glob("*.json")) == []
