@@ -40,11 +40,17 @@
 #   WFM-active suppression: while the dispatcher blocks in wait_for_messages on
 #   an idle inbox, the WFM daemon thread refreshes DISPATCHER_WFM_ACTIVE_FILE
 #   every 60s. A fresh WFM-active file (< 180s) suppresses the heartbeat-stale RED.
-#   CRITICAL (issue #2074): suppression is time-bounded at WFM_SUPPRESSION_MAX_SECONDS
-#   (2700s). A frozen dispatcher's daemon thread keeps refreshing WFM-active
-#   independently of the asyncio loop — unbounded suppression recreates the
-#   false-negative that caused the May 2026 2-day outage. After 2700s of heartbeat
-#   staleness, RED fires regardless of WFM-active freshness.
+#   CRITICAL (issue #2074): suppression is time-bounded at WFM_SUPPRESSION_MAX_SECONDS.
+#   A frozen dispatcher's daemon thread keeps refreshing WFM-active independently
+#   of the asyncio loop — unbounded suppression recreates the false-negative that
+#   caused the May 2026 2-day outage. Once the heartbeat has been stale that long,
+#   RED fires regardless of WFM-active freshness.
+#
+#   WFM_SUPPRESSION_MAX_SECONDS is DERIVED from SESSION_AGE_LIMIT_SECONDS (see
+#   below), not a fixed literal — see the derivation comment near that constant
+#   for why a fixed 2700s cap caused an hourly false-positive restart loop on
+#   2026-08-03 once wait_for_messages was allowed to legitimately idle for hours
+#   (issue #2074, second incident).
 #
 # Boot grace period:
 #   After any restart (health-check-initiated or manual), the new Claude session
@@ -133,16 +139,57 @@ WFM_ACTIVE_STALE_SECONDS=180   # 3x WAIT_HEARTBEAT_INTERVAL (60s) — absorbs on
 # main asyncio event loop — so WFM-active freshness alone is NOT sufficient proof
 # of liveness. The suppression is therefore time-bounded:
 #
-#   If the dispatcher heartbeat has been stale for > WFM_SUPPRESSION_MAX_SECONDS,
+#   If the dispatcher heartbeat has been stale for >= WFM_SUPPRESSION_MAX_SECONDS,
 #   the WFM-active freshness check is ignored and RED fires regardless.
 #
-# Rationale: the heartbeat goes stale when the dispatcher enters WFM (the last
-# PostToolUse fires just before wait_for_messages is called). So heartbeat stale
-# age ≈ time spent in WFM. After WFM_SUPPRESSION_MAX_SECONDS the system has been
-# idle long enough that (a) the watchdog has already fired if WFM was frozen, and
-# (b) the session age limit (SESSION_AGE_LIMIT_SECONDS = 7200s) will soon force a
-# graceful restart. This constant must be less than SESSION_AGE_LIMIT_SECONDS.
-WFM_SUPPRESSION_MAX_SECONDS=2700   # 45 min: stop suppressing beyond this heartbeat-stale age
+# --- Why this is derived, not a fixed literal (issue #2074, second incident) ---
+# The original fix (PR #2090) hardcoded WFM_SUPPRESSION_MAX_SECONDS=2700 (45 min).
+# That assumed a legitimate wait_for_messages() idle window would never get
+# anywhere near 45 minutes, because Claude Code's own client-side MCP tool-idle
+# watchdog used to abort wait_for_messages well under that window. PR #2144
+# (2026-08-02) removed that client-side watchdog *by design*, so wait_for_messages
+# can now legitimately block for hours on a quiet inbox. That silently invalidated
+# the 2700s assumption: any normal quiet period longer than 45 minutes started
+# un-suppressing this check and firing a false RED, restarting a perfectly healthy
+# dispatcher roughly hourly (observed 2026-08-03).
+#
+# check_session_age() already provides an unconditional, activity-independent
+# backstop: every dispatcher session is recycled at SESSION_AGE_LIMIT_SECONDS
+# regardless of heartbeat or WFM state (it sends SIGTERM directly to the
+# dispatcher PID on a wall-clock timer, not a heartbeat-derived one). So this cap
+# no longer needs to be a fast, independent frozen-detector — it only needs to
+# catch the case where that backstop itself failed to fire (e.g. a missing or
+# corrupt dispatcher.pid file). Deriving it as (SESSION_AGE_LIMIT_SECONDS minus a
+# safety margin) keeps it just inside that backstop, so it can never again be
+# tighter than the session lifetime a legitimate idle wait is allowed to reach.
+# See compute_wfm_suppression_max_seconds() below.
+WFM_SUPPRESSION_MARGIN_SECONDS=300      # 5 min: fire slightly before the session-age backstop would anyway
+WFM_SUPPRESSION_FALLBACK_SECONDS=21600  # 6h: used only when SESSION_AGE_LIMIT_SECONDS=0 (session-age check disabled)
+
+# Pure function: derive the WFM-active suppression cap from the session-age
+# limit. No side effects, no globals read — everything comes in as an argument,
+# so this is trivially unit-testable in isolation (see
+# tests/test-health-check-dispatcher-heartbeat.sh).
+#   $1 = session_age_limit  (SESSION_AGE_LIMIT_SECONDS, post config.env override; 0 = disabled)
+#   $2 = margin             (WFM_SUPPRESSION_MARGIN_SECONDS)
+#   $3 = fallback           (WFM_SUPPRESSION_FALLBACK_SECONDS, used when $1 <= 0)
+# Prints the derived value on stdout.
+compute_wfm_suppression_max_seconds() {
+    local session_age_limit="$1"
+    local margin="$2"
+    local fallback="$3"
+
+    if [[ "$session_age_limit" -le 0 ]]; then
+        echo "$fallback"
+        return
+    fi
+
+    local derived=$(( session_age_limit - margin ))
+    if [[ $derived -lt 1 ]]; then
+        derived=1
+    fi
+    echo "$derived"
+}
 
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
@@ -204,6 +251,20 @@ fi
 # Re-apply SESSION_AGE_LIMIT_SECONDS now that config.env may have updated the env var.
 # The initial assignment at top of file used the env var before config.env was read.
 SESSION_AGE_LIMIT_SECONDS="${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-7200}"
+
+# Read LOBSTER_WFM_SUPPRESSION_MAX_SECONDS from config.env (if not already in
+# environment) for operators who want an explicit override instead of the
+# SESSION_AGE_LIMIT_SECONDS-derived default (see compute_wfm_suppression_max_seconds
+# above, and the comment near WFM_SUPPRESSION_MARGIN_SECONDS for why this is
+# derived rather than a fixed literal).
+if [[ -z "${LOBSTER_WFM_SUPPRESSION_MAX_SECONDS:-}" && -f "$CONFIG_ENV" ]]; then
+    _cfg_wfm_cap=$(grep '^LOBSTER_WFM_SUPPRESSION_MAX_SECONDS=' "$CONFIG_ENV" 2>/dev/null | cut -d'=' -f2- | tr -d '[:space:]"' || true)
+    if [[ -n "$_cfg_wfm_cap" ]]; then
+        LOBSTER_WFM_SUPPRESSION_MAX_SECONDS="$_cfg_wfm_cap"
+    fi
+    unset _cfg_wfm_cap
+fi
+WFM_SUPPRESSION_MAX_SECONDS="${LOBSTER_WFM_SUPPRESSION_MAX_SECONDS:-$(compute_wfm_suppression_max_seconds "$SESSION_AGE_LIMIT_SECONDS" "$WFM_SUPPRESSION_MARGIN_SECONDS" "$WFM_SUPPRESSION_FALLBACK_SECONDS")}"
 
 # Ensure log directory exists
 mkdir -p "$(dirname "$LOG_FILE")"
