@@ -168,32 +168,18 @@ Include the GitHub activity summary in the synthesis for rolling-summary.md and 
 10. **Sync canonical files into the user model DB.**
    Run the bridge pass to push projects, priorities, and preferences from canonical markdown files into the user model DB. This also generates the pre-computed `_context.md` via `write_context_cache()`.
 
-   **Do not call `run_bridges()`** — it takes a single `workspace_path` used for both reads and writes, but in this deployment the canonical read root (`~/lobster-user-config`) and the `_context.md` write root (`~/lobster-workspace`) are different directories. Calling it with one shared path finds no canonical data and silently overwrites the populated `_context.md` with a near-empty stub. Call the three bridge functions directly instead, passing the correct root to each:
+   Invoke the tested CLI script — do not hand-write the bridge-sync Python inline. Inline copies of this logic have drifted twice already (a `ModuleNotFoundError` from a stale `mcp.`-prefixed import — #2180 — and a `TypeError` from a bare `sqlite3.connect()` missing `row_factory` — #2181), both caught only because someone happened to notice the repo's copy had already been fixed. `scripts/run_nightly_bridge_sync.py` is the single, tested vehicle for this step; call it by path instead of re-embedding its internals:
    ```bash
-   cd ~/lobster && uv run python -c "
-   import sys, os
-   sys.path.insert(0, os.path.join(os.getcwd(), 'src', 'mcp'))
-   from user_model.db import open_db
-   from user_model.bridges import sync_projects_to_arcs, sync_priorities_to_attention, write_context_cache
-   from pathlib import Path
-   conn = open_db(Path(os.path.expanduser('~/lobster-workspace/data/memory.db')))
-   canonical_ws = os.path.expanduser('~/lobster-user-config')
-   output_ws = os.path.expanduser('~/lobster-workspace')
-   proj = sync_projects_to_arcs(conn, canonical_ws)
-   pri = sync_priorities_to_attention(conn, canonical_ws)
-   write_context_cache(conn, output_ws)
-   conn.commit()
-   conn.close()
-   print(proj, pri)
-   "
+   cd ~/lobster && uv run python scripts/run_nightly_bridge_sync.py \
+     --canonical-root ~/lobster-user-config \
+     --workspace-root ~/lobster-workspace
    ```
-   Notes on this invocation:
-   - Import `user_model.db` / `user_model.bridges` directly (no `mcp.` prefix) after putting `src/mcp` itself on `sys.path`. Importing via `from mcp.user_model.bridges import ...` after `sys.path.insert(0, 'src')` breaks because `mcp` resolves to the installed MCP SDK package in site-packages, not `src/mcp/`.
-   - Open the connection with `user_model.db.open_db()`, not a bare `sqlite3.connect()`. `open_db()` sets `conn.row_factory = sqlite3.Row`, which the bridge query functions require for dict-style row access — without it, queries fail and are silently swallowed by broad `except` blocks, again producing a near-empty `_context.md`.
-   - `sync_projects_to_arcs` and `sync_priorities_to_attention` read from `canonical_ws` (canonical memory files); `write_context_cache` writes into `output_ws` (the workspace `_context.md` lives under). Do not use the same variable for both.
+   `--canonical-root` (read root for `projects/*.md` and `priorities.md`) and `--workspace-root` (write root for the user-model DB and `_context.md`) must stay independent arguments — never collapse them into one shared path (see PR #2136: `run_bridges()`'s single `workspace_path` did that and silently overwrote a populated `_context.md` with a near-empty stub).
 
-   This syncs `projects/*.md` as narrative arcs and `priorities.md` as attention items, and writes the pre-computed `~/lobster-workspace/user-model/_context.md`.
+   This syncs `projects/*.md` as narrative arcs and `priorities.md` as attention items, and writes the pre-computed `~/lobster-workspace/user-model/_context.md`. The script prints a JSON summary and exits non-zero if any of the three sub-steps (`projects`, `priorities`, `context_cache`) reported an error.
    If the script fails (e.g. DB not initialized), continue to step 11.
+
+   **Private-overlay note:** if `~/lobster-user-config/.claude/agents/nightly-consolidation.md` carries its own copy of step 10, update it to call this same script by path rather than re-embedding inline Python — that overlay file lives outside this repo and was the source of both #2180 and #2181.
 
 11. **Write `_context.md` (user model summary).**
     Call `model_user_context(deep=True)` to retrieve structured user model data from the DB.
