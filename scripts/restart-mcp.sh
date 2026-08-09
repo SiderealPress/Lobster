@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# restart-mcp.sh — Safe wrapper for restarting the lobster-mcp-local service.
+# restart-mcp.sh — Safe wrapper for restarting the lobster-mcp service.
 #
-# USE THIS SCRIPT instead of calling `sudo systemctl restart lobster-mcp-local`
+# USE THIS SCRIPT instead of calling `sudo systemctl restart lobster-mcp`
 # directly.  Direct restarts invalidate the active MCP session immediately,
 # leaving the dispatcher blocked in wait_for_messages with a "Session not found"
 # error and no recovery guidance.
@@ -9,7 +9,7 @@
 # This script:
 #   1. Writes an mcp-restart warning message to ~/messages/inbox/
 #   2. Waits 2 seconds for the dispatcher to process it
-#   3. Runs `sudo systemctl restart lobster-mcp-local`
+#   3. Runs `sudo systemctl restart lobster-mcp`
 #
 # The inbox message tells the dispatcher the restart is intentional and that
 # it should re-orient after reconnecting.  Combined with Fix 1
@@ -42,7 +42,7 @@ cat > "${MSG_FILE}.tmp" <<EOF
   "source": "system",
   "type": "compact-reminder",
   "chat_id": 0,
-  "text": "MCP RESTART INCOMING — The lobster-mcp-local service is about to restart. Your MCP session will be invalidated. Re-orient after reconnecting: read sys.dispatcher.bootup.md and resume the main loop.",
+  "text": "MCP RESTART INCOMING — The lobster-mcp service is about to restart. Your MCP session will be invalidated. Re-orient after reconnecting: read sys.dispatcher.bootup.md and resume the main loop.",
   "timestamp": "${TIMESTAMP}"
 }
 EOF
@@ -55,6 +55,6 @@ if [[ "${NO_WAIT}" == "false" ]]; then
     sleep 2
 fi
 
-echo "[restart-mcp] Restarting lobster-mcp-local..."
-sudo systemctl restart lobster-mcp-local
+echo "[restart-mcp] Restarting lobster-mcp..."
+sudo systemctl restart lobster-mcp
 echo "[restart-mcp] Service restarted."
