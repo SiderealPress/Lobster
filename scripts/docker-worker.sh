@@ -30,17 +30,28 @@ PROMPT="$5"
 #===============================================================================
 # Source config for API key
 #===============================================================================
-CONFIG_ENV="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}/config.env"
+# Deliberately NOT config.env: config.env is loaded as an EnvironmentFile by
+# nearly every Lobster systemd unit, including lobster-claude.service (the
+# dispatcher itself). A key placed there leaks into the dispatcher's own auth
+# environment -- this happened once already with a shared ANTHROPIC_API_KEY
+# (disabled 2026-08-05 after it was found silently overriding the dispatcher's
+# setup-token OAuth credential). docker-worker.sh gets its own dedicated,
+# never-EnvironmentFile'd config file instead. See config/docker-worker.env.example.
+CONFIG_ENV="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}/docker-worker.env"
 
 if [[ ! -f "$CONFIG_ENV" ]]; then
     echo "ERROR: Config file not found: $CONFIG_ENV" >&2
+    echo "  Copy config/docker-worker.env.example to $CONFIG_ENV and fill in a" >&2
+    echo "  dedicated ANTHROPIC_API_KEY (do not reuse the dispatcher's shared key)." >&2
     exit 1
 fi
 
 ANTHROPIC_API_KEY=$(grep '^ANTHROPIC_API_KEY=' "$CONFIG_ENV" | cut -d'=' -f2-)
 
 if [[ -z "$ANTHROPIC_API_KEY" ]]; then
-    echo "ERROR: ANTHROPIC_API_KEY not found in $CONFIG_ENV" >&2
+    echo "ERROR: ANTHROPIC_API_KEY not set in $CONFIG_ENV" >&2
+    echo "  Provision a dedicated key at https://console.anthropic.com/settings/keys" >&2
+    echo "  and set it in $CONFIG_ENV -- see config/docker-worker.env.example." >&2
     exit 1
 fi
 
