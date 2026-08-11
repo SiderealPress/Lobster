@@ -1,11 +1,26 @@
 #!/usr/bin/env python3
-"""PostToolUse hook: auto-register spawned agents into agent_sessions.db.
+"""PostToolUse hook: auto-register spawned agents into agent_sessions.db and
+inflight-work.jsonl.
 
 Fires after every Agent tool call. Extracts structured metadata from the
-agent prompt (YAML frontmatter or legacy "task_id is:" text), then inserts
-a 'running' row into agent_sessions.db so the spawned agent is immediately
-visible to the ghost detector and status queries. No intermediate 'starting'
-state is used — the agent IS running at the point this hook fires.
+agent prompt (YAML frontmatter or legacy "task_id is:" text), then:
+
+1. Inserts a 'running' row into agent_sessions.db so the spawned agent is
+   immediately visible to the ghost detector and status queries. No
+   intermediate 'starting' state is used — the agent IS running at the point
+   this hook fires.
+
+2. Writes a 'running' entry to inflight-work.jsonl (issue: automate-inflight-
+   work-writes), reusing scripts/save-inflight-prompt.py's actual write logic
+   (loaded dynamically — see `_load_save_inflight_prompt_module`) so the
+   JSONL schema and prompt-file-on-disk mechanism never diverge from that
+   script. This automates a step that was previously a manual dispatcher
+   instruction (see .claude/sys.dispatcher.bootup.md, "In-Flight Work
+   Tracking") and therefore depended on an LLM remembering to run it on every
+   single Agent call — confirmed unreliable in production (no new entries
+   written since 2026-05-31 despite many subsequent agent spawns). Skipped
+   when no task_id is present, since inflight-work.jsonl entries are keyed by
+   task_id.
 
 ## Frontmatter format (preferred)
 
@@ -42,6 +57,7 @@ Add this to ~/.claude/settings.json under "hooks" -> "PostToolUse":
     }
 """
 
+import importlib.util
 import json
 import os
 import re
@@ -321,6 +337,97 @@ def insert_agent_session(
 
 
 # ---------------------------------------------------------------------------
+# inflight-work.jsonl "running" entry (issue: automate-inflight-work-writes)
+# ---------------------------------------------------------------------------
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+_SAVE_INFLIGHT_PROMPT_SCRIPT = _SCRIPTS_DIR / "save-inflight-prompt.py"
+
+
+def _load_save_inflight_prompt_module():
+    """Dynamically import scripts/save-inflight-prompt.py.
+
+    The filename is hyphenated so it cannot be imported as a normal module --
+    load it via importlib.util the same way tests/unit/test_hooks/*.py already
+    load hyphenated hook files. Reusing the real module (rather than
+    reimplementing its I/O) guarantees the JSONL schema and prompt-file
+    mechanism never diverge from save-inflight-prompt.py.
+
+    Returns the loaded module, or None on any failure. Never raises.
+    """
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "save_inflight_prompt", _SAVE_INFLIGHT_PROMPT_SCRIPT
+        )
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def write_inflight_running_entry(
+    *,
+    task_id: str | None,
+    chat_id: str | None,
+    source: str,
+    subagent_type: str | None,
+    description: str | None,
+    prompt: str,
+) -> None:
+    """Best-effort: write a 'running' entry to inflight-work.jsonl for this spawn.
+
+    Skipped entirely when task_id is None -- inflight-work.jsonl entries are
+    keyed by task_id (required by save-inflight-prompt.py's REQUIRED_FIELDS
+    and by the consumers in on-fresh-start.py / dispatcher-state-stop.py), so
+    a task_id-less spawn has nothing meaningful to record against.
+
+    Never raises -- failures are logged to hook-failures.log and swallowed,
+    mirroring insert_agent_session's failure policy so a bookkeeping problem
+    never blocks the Agent call.
+    """
+    if not task_id:
+        return
+
+    mod = _load_save_inflight_prompt_module()
+    if mod is None:
+        _log_failure(
+            f"could not load save-inflight-prompt module; "
+            f"skipped inflight-work running entry for task_id={task_id!r}"
+        )
+        return
+
+    try:
+        started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            chat_id_value: object = int(chat_id) if chat_id is not None else 0
+        except (TypeError, ValueError):
+            chat_id_value = chat_id
+
+        payload = {
+            "task_id": task_id,
+            "type": subagent_type or "subagent",
+            "description": description or "",
+            "started_at": started_at,
+            "chat_id": chat_id_value,
+            "subagent_type": subagent_type,
+            "status": "running",
+        }
+
+        prompt_file_path = mod.write_prompt_file(
+            mod.INFLIGHT_PROMPTS_DIR, task_id, prompt or ""
+        )
+        entry = mod.build_jsonl_entry(payload, prompt_file_path)
+        mod.append_jsonl_entry(mod.INFLIGHT_WORK_FILE, entry)
+    except Exception as exc:  # noqa: BLE001
+        _log_failure(
+            f"failed to write inflight-work running entry for task_id={task_id!r}: {exc}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -365,6 +472,15 @@ def main() -> None:
             output_file=output_file,
             input_summary=input_summary,
             dispatcher_pid=dispatcher_pid,
+        )
+
+        write_inflight_running_entry(
+            task_id=metadata["task_id"],
+            chat_id=metadata["chat_id"],
+            source=metadata["source"],
+            subagent_type=tool_input.get("subagent_type"),
+            description=tool_input.get("description"),
+            prompt=prompt,
         )
 
     except Exception as exc:  # noqa: BLE001

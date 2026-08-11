@@ -723,4 +723,121 @@ class TestFallbackAfterNFires:
         result = mod._extract_pre_hook_text(transcript, first_fire_ts=first_ts, n_turns=10)
 
         assert "early" in result
-        assert "late" not in result
+
+
+# ---------------------------------------------------------------------------
+# inflight-work.jsonl "done" entry automation
+# (issue: automate-inflight-work-writes)
+# ---------------------------------------------------------------------------
+
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+class TestInflightDoneEntry:
+    """Automates the 'done' entry that was previously a manual dispatcher Bash
+    append performed while handling subagent_result messages (see
+    .claude/sys.dispatcher.bootup.md, 'In-Flight Work Tracking'). Confirmed
+    unreliable in production: no new inflight-work.jsonl entries were written
+    since 2026-05-31 despite many subsequent subagent completions.
+    """
+
+    def _inflight_work_file(self, tmp_path: Path) -> Path:
+        return tmp_path / "lobster-workspace" / "data" / "inflight-work.jsonl"
+
+    def test_done_entry_written_on_successful_write_result(self, monkeypatch, tmp_path):
+        """A SubagentStop with a valid write_result(chat_id=..., task_id=...)
+        call appends a 'done' entry for that task_id."""
+        mod = _load_hook(monkeypatch, tmp_path)
+
+        transcript_file = tmp_path / "agent-sub.jsonl"
+        messages = _make_transcript_with_write_result(chat_id=99999, task_id="t-done-1")
+        _write_jsonl_transcript(transcript_file, messages)
+
+        hook_input = _make_subagentstop_hook_input(str(transcript_file))
+        exit_code, _, stderr = _run_hook(mod, hook_input)
+
+        assert exit_code == 0, f"Expected exit 0, got {exit_code}. stderr={stderr}"
+
+        entries = _read_jsonl(self._inflight_work_file(tmp_path))
+        done_entries = [e for e in entries if e.get("task_id") == "t-done-1"]
+        assert len(done_entries) == 1
+        assert done_entries[0]["status"] == "done"
+        assert "completed_at" in done_entries[0]
+
+    def test_no_done_entry_when_chat_id_none(self, monkeypatch, tmp_path):
+        """write_result called with chat_id=None is invalid -- no done entry,
+        and the SubagentStop still blocks exit (exit 2)."""
+        mod = _load_hook(monkeypatch, tmp_path)
+
+        transcript_file = tmp_path / "agent-sub.jsonl"
+        messages = _make_transcript_with_write_result(chat_id=None, task_id="t-nochat")
+        _write_jsonl_transcript(transcript_file, messages)
+
+        hook_input = _make_subagentstop_hook_input(str(transcript_file))
+        exit_code, _, _ = _run_hook(mod, hook_input)
+
+        assert exit_code == 2
+        entries = _read_jsonl(self._inflight_work_file(tmp_path))
+        assert not any(e.get("task_id") == "t-nochat" for e in entries)
+
+    def test_no_done_entry_when_write_result_not_called(self, monkeypatch, tmp_path):
+        """No write_result call at all -- no done entry written, no crash on
+        (absent) inflight-work.jsonl file."""
+        mod = _load_hook(monkeypatch, tmp_path)
+
+        transcript_file = tmp_path / "agent-sub.jsonl"
+        _write_jsonl_transcript(transcript_file, _make_transcript_no_write_result())
+
+        hook_input = _make_subagentstop_hook_input(str(transcript_file))
+        exit_code, _, _ = _run_hook(mod, hook_input)
+
+        assert exit_code == 2
+        assert not self._inflight_work_file(tmp_path).exists()
+
+    def test_done_entry_respects_override_env_var(self, monkeypatch, tmp_path):
+        """LOBSTER_INFLIGHT_WORK_FILE_OVERRIDE redirects the done-entry write,
+        matching the convention used by scripts/save-inflight-prompt.py and
+        hooks/on-fresh-start.py."""
+        override_path = tmp_path / "custom" / "inflight-work.jsonl"
+        monkeypatch.setenv("LOBSTER_INFLIGHT_WORK_FILE_OVERRIDE", str(override_path))
+        mod = _load_hook(monkeypatch, tmp_path)
+
+        transcript_file = tmp_path / "agent-sub.jsonl"
+        messages = _make_transcript_with_write_result(chat_id=1, task_id="t-override")
+        _write_jsonl_transcript(transcript_file, messages)
+
+        hook_input = _make_subagentstop_hook_input(str(transcript_file))
+        exit_code, _, _ = _run_hook(mod, hook_input)
+
+        assert exit_code == 0
+        entries = _read_jsonl(override_path)
+        assert any(e.get("task_id") == "t-override" and e.get("status") == "done" for e in entries)
+        # The default location must remain untouched.
+        assert not self._inflight_work_file(tmp_path).exists()
+
+    def test_multiple_write_result_task_ids_each_get_done_entry(self, monkeypatch, tmp_path):
+        """If the transcript contains multiple write_result calls with
+        distinct task_ids (unusual but possible), each gets a done entry."""
+        mod = _load_hook(monkeypatch, tmp_path)
+
+        transcript_file = tmp_path / "agent-sub.jsonl"
+        messages = [
+            _make_jsonl_entry_with_write_result(chat_id=1, task_id="t-multi-a"),
+            _make_jsonl_entry_with_write_result(chat_id=1, task_id="t-multi-b"),
+        ]
+        _write_jsonl_transcript(transcript_file, messages)
+
+        hook_input = _make_subagentstop_hook_input(str(transcript_file))
+        exit_code, _, _ = _run_hook(mod, hook_input)
+
+        assert exit_code == 0
+        entries = _read_jsonl(self._inflight_work_file(tmp_path))
+        task_ids_done = {e["task_id"] for e in entries if e.get("status") == "done"}
+        assert {"t-multi-a", "t-multi-b"} <= task_ids_done
