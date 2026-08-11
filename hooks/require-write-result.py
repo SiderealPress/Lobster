@@ -409,10 +409,28 @@ def _write_synthetic_inbox_message(
             f"Content recovered from transcript after {MAX_HOOK_FIRES} hook fires."
         )
 
-        if content:
-            text = f"{recovery_note}\n\nRecovered content:\n\n{content}"
-        else:
-            text = f"{recovery_note}\n\n(No recoverable transcript content found.)"
+        if not content:
+            # No recoverable content means there is nothing actionable for the
+            # dispatcher to relay or decide on. Writing this to inbox/ forces a
+            # full dispatcher turn (wait_for_messages wake + mark_processed) for
+            # zero information — this fires every ~3-4 min from the known
+            # phantom-hook issue (GitHub #2175), so route it to a log file
+            # instead of burning a dispatcher turn on an empty message.
+            try:
+                log_dir = Path(os.path.expanduser("~/lobster-workspace/logs"))
+                log_dir.mkdir(parents=True, exist_ok=True)
+                log_line = (
+                    f"[{now.isoformat()}] {recovery_note} "
+                    f"task_id_hint={task_id_hint!r} agent_id={data.get('agent_id')!r} "
+                    f"session_id={data.get('session_id')!r}\n"
+                )
+                with open(log_dir / "ghost-agent-recovery.log", "a") as f:
+                    f.write(log_line)
+            except Exception:
+                pass
+            return
+
+        text = f"{recovery_note}\n\nRecovered content:\n\n{content}"
 
         message = {
             "id": message_id,
