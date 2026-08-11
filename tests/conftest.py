@@ -38,6 +38,32 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# ---------------------------------------------------------------------------
+# Force LOBSTER_WORKSPACE to an isolated temp dir for the whole test session,
+# BEFORE any test module can import src.bot.lobster_bot.
+#
+# Root cause this fixes: src/bot/lobster_bot.py resolves LOG_DIR from
+# LOBSTER_WORKSPACE at *module import time* and immediately attaches a
+# RotatingFileHandler to the shared "lobster" logger pointing at
+# LOG_DIR/telegram-bot.log. The isolate_inbox_server_paths fixture below only
+# patches src.mcp.inbox_server's path globals -- it has no equivalent guard
+# for src.bot.lobster_bot. On a machine where LOBSTER_WORKSPACE is set in the
+# environment (e.g. this host, where the always-on Lobster process exports
+# it), running pytest in that same shell/session causes lobster_bot.py to
+# import with the *real* production LOBSTER_WORKSPACE, and any test that
+# imports or exercises lobster_bot (handle_audio_message, handle_photo_message,
+# etc.) writes synthetic pytest/MagicMock log lines straight into the
+# production ~/lobster-workspace/logs/telegram-bot.log.
+#
+# Overriding (not just defaulting) LOBSTER_WORKSPACE here, unconditionally,
+# before any src.* module is imported, ensures lobster_bot.py's module-level
+# LOG_DIR always resolves to a throwaway temp directory during tests. This
+# does not affect tests that explicitly monkeypatch LOBSTER_WORKSPACE for
+# subprocess envs (env=os.environ.copy()-style dicts) -- those are unaffected
+# since they build their own env mapping.
+# ---------------------------------------------------------------------------
+os.environ["LOBSTER_WORKSPACE"] = tempfile.mkdtemp(prefix="lobster-test-workspace-")
+
 # Add source and tests directories to path
 SRC_DIR = Path(__file__).parent.parent / "src"
 TESTS_DIR = Path(__file__).parent
