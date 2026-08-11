@@ -326,19 +326,26 @@ class TestSubagentStopHook:
         assert exit_code == 0, f"Expected exit 0 (safe fallback), got {exit_code}"
 
     def test_exits_0_when_jsonl_file_nonexistent(self, monkeypatch, tmp_path):
-        """SubagentStop: transcript file doesn't exist → allow exit (safe fallback)."""
+        """SubagentStop: transcript file doesn't exist → ghost fast-path, allow exit.
+
+        Issue #2175 root-cause update (2026-08-10): a completely absent
+        agent_transcript_path file (not merely empty/malformed) is a reliable
+        signal that this SubagentStop was never a real Task-tool subagent —
+        real subagents always get their agent-<id>.jsonl file created at spawn
+        time, before any turns are recorded. Phantom Claude-Code-internal
+        SubagentStop fires (see module docstring / ghost-agent-recovery.log)
+        point at a transcript path that was never created. Blocking these with
+        exit 2 for up to MAX_HOOK_FIRES retries wastes cycles on something that
+        can never call write_result, so the hook now short-circuits to a clean
+        exit 0 on first sight instead of retry-blocking.
+        """
         mod = _load_hook(monkeypatch, tmp_path)
 
         hook_input = _make_subagentstop_hook_input("/nonexistent/path/agent.jsonl")
-        # File doesn't exist, _load_transcript_from_jsonl returns []
-        # With empty transcript, no write_result found → would exit 2.
-        # But missing file is indistinguishable from an agent that didn't call write_result,
-        # so this test documents the actual behavior: exits 2.
         exit_code, stdout, stderr = _run_hook(mod, hook_input)
 
-        # An unreadable transcript means we can't verify — exit 2 (conservative)
-        # This is expected: the agent should have called write_result.
-        assert exit_code == 2
+        # Ghost fast-path: exit 0 immediately, no blocking retries.
+        assert exit_code == 0
 
     def test_blocking_message_goes_to_stderr(self, monkeypatch, tmp_path):
         """SubagentStop block messages must use stderr."""

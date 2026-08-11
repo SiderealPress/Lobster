@@ -477,6 +477,61 @@ def main():
         if not transcript_path:
             # No path provided — can't verify; allow exit to avoid blocking.
             _exit_ok()
+
+        # --- Ghost fast-path (issue #2175) -----------------------------------
+        # Investigation on 2026-08-10 confirmed: every real Task-tool subagent
+        # gets an agent-<agent_id>.jsonl (and sibling .meta.json) file created
+        # under .claude/projects/<project>/<dispatcher-session-id>/subagents/
+        # at SPAWN time — before the subagent produces a single turn. Dozens of
+        # "phantom" SubagentStop fires were sampled (agent_ids with no row in
+        # agent_sessions.db, no register_agent call, no meta.json, and — this is
+        # the new finding — no transcript file on disk AT ALL, not merely an
+        # empty one). These ghosts cluster in tight ~20-40s bursts strictly
+        # during periods when a real session (dispatcher or subagent) is
+        # actively making tool calls, and go completely silent for hours during
+        # idle windows — ruling out a periodic cron/systemd timer (checked:
+        # crontab, systemd timers, nothing matches). This points to a Claude
+        # Code harness-internal mechanism (not a Lobster-side bug) that
+        # allocates an agent_id and fires SubagentStop for something that was
+        # never a real Agent/Task-tool spawn.
+        #
+        # Previously the hook would blindly retry-block (exit 2) up to
+        # MAX_HOOK_FIRES=5 times over ~2-3 minutes before giving up — for a
+        # session that structurally can never call write_result because it was
+        # never running Lobster's system prompt. Since a missing transcript
+        # file (FileNotFoundError, not just an empty/malformed one) is now a
+        # reliable, cheap, first-fire signal for "this is not a real Lobster
+        # subagent", short-circuit immediately: log once and exit clean instead
+        # of paying for 5 rounds of blocking retries per ghost.
+        if not os.path.exists(transcript_path):
+            try:
+                log_dir = Path(os.path.expanduser("~/lobster-workspace/logs"))
+                log_dir.mkdir(parents=True, exist_ok=True)
+                now = datetime.now(timezone.utc)
+                log_line = (
+                    f"[{now.isoformat()}] Ghost SubagentStop fast-path: "
+                    f"agent_transcript_path does not exist on disk (never a real "
+                    f"Task-tool spawn). agent_id={data.get('agent_id')!r} "
+                    f"session_id={data.get('session_id')!r} "
+                    f"transcript_path={transcript_path!r}\n"
+                )
+                with open(log_dir / "ghost-agent-recovery.log", "a") as f:
+                    f.write(log_line)
+                # Also append the full raw hook payload to a rolling debug log
+                # so a future investigation can inspect whatever additional
+                # fields CC sends for these ghosts (e.g. to finally confirm
+                # which internal CC mechanism produces them).
+                debug_path = log_dir / "ghost-agent-raw-input.jsonl"
+                with open(debug_path, "a") as f:
+                    f.write(json.dumps({"logged_at": now.isoformat(), "hook_input": data}) + "\n")
+            except Exception:
+                pass  # Best-effort diagnostics; never block exit
+            # Clean up any fire-count temp file that may exist for this key
+            # (defensive — normally none exists yet on the fast path).
+            key = _agent_key(data)
+            _cleanup_fire_state(_fire_count_path(key))
+            _exit_ok()
+
         transcript = _load_transcript_from_jsonl(transcript_path)
     else:
         # Stop hook: CC 2.1.76+ passes transcript_path (JSONL file), not inline.
