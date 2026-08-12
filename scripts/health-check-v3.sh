@@ -1426,6 +1426,58 @@ count_active_subagents() {
 }
 
 #===============================================================================
+# get_descendant_pids — recursively enumerate ALL descendants of a PID
+# (issue #2221)
+#
+# `pgrep -P $pid` only returns DIRECT children — one hop. Stdio MCP servers
+# spawned via `npx`/`npm exec` fork through an intermediate `sh -c` wrapper
+# before reaching the real worker process, so the process that actually needs
+# to be killed (e.g. the obsidian-mcp `node` process) can be two or three hops
+# below the dispatcher's direct child, not one. A single `pgrep -P` call never
+# reaches it.
+#
+# This does a breadth-first walk of the full descendant tree — pgrep -P on
+# each newly-discovered PID, repeated until no new descendants are found — so
+# every hop is captured regardless of depth, instead of assuming a fixed hop
+# count.
+#
+# $1 = root PID to walk descendants of (e.g. the dispatcher PID)
+# Prints one descendant PID per line to stdout (may print nothing if the PID
+# has no children). Never includes the root PID itself.
+#===============================================================================
+get_descendant_pids() {
+    local root_pid="$1"
+    local queue=("$root_pid")
+    local descendants=()
+    local visited=" "
+
+    while [[ ${#queue[@]} -gt 0 ]]; do
+        local current="${queue[0]}"
+        queue=("${queue[@]:1}")
+
+        # Defensive guard against a repeated PID in the walk (shouldn't happen
+        # with real process trees, but keeps this safe against pathological
+        # /proc states rather than looping forever).
+        if [[ "$visited" == *" $current "* ]]; then
+            continue
+        fi
+        visited="$visited$current "
+
+        local children
+        children=$(pgrep -P "$current" 2>/dev/null || true)
+        local child
+        for child in $children; do
+            descendants+=("$child")
+            queue+=("$child")
+        done
+    done
+
+    if [[ ${#descendants[@]} -gt 0 ]]; then
+        printf '%s\n' "${descendants[@]}"
+    fi
+}
+
+#===============================================================================
 # Session Age Check — proactive restart before the 7440s CC hard limit
 # (issue #2059)
 #
@@ -1504,16 +1556,29 @@ check_session_age() {
         return 0
     fi
 
-    # Snapshot the dispatcher's direct children BEFORE sending SIGTERM (issue
-    # #2119). This must happen first: once the dispatcher (`claude`) receives
-    # SIGTERM and exits, its children (stdio MCP servers like `obsidian-mcp`)
-    # are reparented away from $dispatcher_pid immediately — querying `pgrep -P
-    # $dispatcher_pid` AFTER the SIGTERM is a race that can find zero children
-    # even though they existed a moment earlier, because the parent is already
-    # gone by the time the query runs. Capturing the list first and signalling
-    # those specific PIDs afterward removes the race entirely.
+    # Snapshot the dispatcher's FULL descendant tree BEFORE sending SIGTERM
+    # (issue #2119, hardened for #2221). This must happen first: once the
+    # dispatcher (`claude`) receives SIGTERM and exits, its children (stdio
+    # MCP servers like `obsidian-mcp`) are reparented away from
+    # $dispatcher_pid immediately — querying the process tree AFTER the
+    # SIGTERM is a race that can find zero children even though they existed
+    # a moment earlier, because the parent is already gone by the time the
+    # query runs. Capturing the list first and signalling those specific PIDs
+    # afterward removes the race entirely.
+    #
+    # #2221: a single `pgrep -P $dispatcher_pid` only reaches ONE hop below
+    # the dispatcher. The real obsidian-mcp process tree is three hops deep
+    # (verified live via `ps -o pid,ppid,pgid,sid,comm`):
+    #   claude (dispatcher) -> npm exec obsidian-mcp -> sh -c obsidian-mcp -> node .../obsidian-mcp
+    # `npx`/`npm exec` forks (does not exec) into an intermediate `sh -c`,
+    # which forks (does not exec) into the real `node` worker -- the process
+    # that actually hangs. A one-hop `pgrep -P` only ever found the `npm exec`
+    # wrapper; its `sh`/`node` descendants were left running and reparented to
+    # PID 1 on every session-age restart, so this got caught by the cron
+    # backstop reaper instead of prevented at restart time. get_descendant_pids()
+    # walks the whole tree (all hops) so every descendant is captured.
     local mcp_child_pids
-    mcp_child_pids=$(pgrep -P "$dispatcher_pid" 2>/dev/null || true)
+    mcp_child_pids=$(get_descendant_pids "$dispatcher_pid")
 
     # Notify BEFORE sending SIGTERM (issue #2075) so the message reaches the user
     # even if the session exits immediately once SIGTERM is delivered — if the
@@ -1536,10 +1601,11 @@ check_session_age() {
     if kill -TERM "$dispatcher_pid" 2>/dev/null; then
         log_warn "Session age: SIGTERM sent to dispatcher PID $dispatcher_pid"
 
-        # Also signal the dispatcher's direct child processes we snapshotted
-        # above -- stdio MCP servers like `obsidian-mcp` (issue #2119).
+        # Also signal every descendant process we snapshotted above -- stdio
+        # MCP servers like `obsidian-mcp` (issue #2119), reached at every hop
+        # of the tree, not just the dispatcher's direct child (issue #2221).
         # SIGTERM to $dispatcher_pid only reaches the `claude` process itself;
-        # it does NOT cascade to stdio MCP children it spawned, which are
+        # it does NOT cascade to stdio MCP descendants it spawned, which are
         # simply orphaned (reparented to PID 1) rather than killed.
         # obsidian-mcp specifically has no application-level timeout and can
         # be mid-hang at the moment of this restart, so leaving it running
@@ -1558,12 +1624,13 @@ check_session_age() {
 }
 
 #===============================================================================
-# kill_dispatcher_children — signal direct child processes of the dispatcher
-# (issue #2119)
+# kill_dispatcher_children — signal descendant processes of the dispatcher
+# (issue #2119, hardened for #2221)
 #
 # Why not signal the dispatcher's whole process group instead (kill -TERM
 # -$pgid)? That was the initial fix proposal, but it does not hold up against
-# the live process tree. Verified on the production host:
+# the live process tree. Verified on the production host, both at #2119 fix
+# time and re-verified for #2221 (still holds -- same PGID sharing today):
 #
 #   $ ps -o pid,ppid,pgid,sid,comm -p "$dispatcher_pid"
 #       PID    PPID    PGID     SID COMMAND
@@ -1575,31 +1642,40 @@ check_session_age() {
 # runs under the tmux session leader. `kill -TERM -$dispatcher_pid` would
 # target a process group that doesn't exist (no-op); using the *real* PGID
 # instead would SIGTERM the supervisor and the tmux pane along with it,
-# breaking the auto-restart mechanism this entire flow depends on.
+# breaking the auto-restart mechanism this entire flow depends on. This also
+# rules out PGID as the fix for #2221: every obsidian-mcp descendant (the
+# `npm exec` wrapper, the `sh -c` it forks, and the `node` worker under that)
+# shares that same PGID with the supervisor, so group-signalling still is not
+# a safe way to isolate "the dispatcher's descendants" from "the supervisor
+# that must survive the restart."
 #
-# Enumerating direct children of $dispatcher_pid (ps --ppid / pgrep -P) is
-# the safe alternative: it reaches every MCP child the dispatcher spawned
-# (obsidian-mcp, inbox_server.py, etc.) without touching anything above the
-# dispatcher in the process tree. A fresh set of children is spawned by the
-# next Claude launch regardless, so killing all current children here is
-# safe -- none of them have a reason to outlive this session.
+# Enumerating the FULL descendant tree of $dispatcher_pid (get_descendant_pids,
+# a recursive walk -- see #2221) is the safe alternative: it reaches every MCP
+# descendant the dispatcher spawned at every hop (obsidian-mcp's `npm exec` ->
+# `sh -c` -> `node` chain, inbox_server.py, etc.) without touching anything
+# above the dispatcher in the process tree. A one-hop `pgrep -P` (the #2119
+# implementation) only found the immediate child (`npm exec`); it did not
+# reach the `sh`/`node` descendants underneath, which is exactly the gap
+# #2221 closes. A fresh set of children is spawned by the next Claude launch
+# regardless, so killing all current descendants here is safe -- none of them
+# have a reason to outlive this session.
 #
-# Takes the child PIDs as arguments (already-enumerated by the caller) rather
-# than a parent PID to enumerate itself. This matters: the caller must
-# snapshot the children BEFORE sending SIGTERM to the dispatcher, because
+# Takes the descendant PIDs as arguments (already-enumerated by the caller)
+# rather than a parent PID to enumerate itself. This matters: the caller must
+# snapshot the descendants BEFORE sending SIGTERM to the dispatcher, because
 # once the dispatcher exits its children are reparented away immediately —
-# enumerating *after* the SIGTERM is a race that can observe zero children
+# enumerating *after* the SIGTERM is a race that can observe zero descendants
 # even though they existed a moment earlier.
 #===============================================================================
 kill_dispatcher_children() {
     local child_pids="$*"
 
     if [[ -z "${child_pids// /}" ]]; then
-        log_info "Session age: no child processes to signal"
+        log_info "Session age: no descendant processes to signal"
         return 0
     fi
 
-    log_warn "Session age: signalling dispatcher child process(es): $(echo "$child_pids" | tr '\n' ' ')"
+    log_warn "Session age: signalling dispatcher descendant process(es): $(echo "$child_pids" | tr '\n' ' ')"
 
     local sigterm_pids=()
     local cpid
