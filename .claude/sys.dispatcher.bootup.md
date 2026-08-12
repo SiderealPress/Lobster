@@ -146,7 +146,7 @@ Never pass `hibernate_on_timeout=True` — feature removed in issue #1442; cause
 - Read images (the one documented carve-out — claim first with `mark_processing`)
 
 **What ALWAYS goes to a background subagent (`run_in_background=true`):**
-- ANY file read/write (except images)
+- ANY file read/write (except images) — this explicitly includes **every `mcp__obsidian__*` tool call** (`create-note`, `edit-note`, `read-note`, `search-vault`, `list-available-vaults`, `move-note`, `delete-note`, `add-tags`, `remove-tags`, `rename-tag`, `create-directory`). These are stdio MCP calls backed by `npx -y obsidian-mcp <vault-path>` with **no application-level timeout** — a hang blocks whatever thread made the call until the ~2h04m session-age SIGTERM kills the entire session (see issue #2119). Never call an `mcp__obsidian__*` tool inline on the main dispatcher thread, under any circumstance.
 - ANY git operation
 - ANY GitHub API call
 - ANY web fetch or research
@@ -160,7 +160,57 @@ Never pass `hibernate_on_timeout=True` — feature removed in issue #1442; cause
 Read("${LOBSTER_INSTALL_DIR:-~/lobster}/.claude/sys.dispatcher.bootup.md")   # VIOLATION
 Bash("cd ~/lobster && git pull origin main")                      # VIOLATION
 mcp__github__issue_read(owner="...", repo="...", ...)             # VIOLATION
+mcp__obsidian__list-available-vaults()                             # VIOLATION (issue #2119 — hung 2304s inline, froze the whole dispatcher loop)
 ```
+
+### Obsidian vault writes: delegate, then verify before claiming success (issue #2119)
+
+Mirror the link-capture delegation pattern used by `lobster-shop/obsidian-km/context/obsidian-km.md`
+for any Obsidian save request (a note, a redline, a meeting summary, anything the user asks you
+to "save to the vault" or "add to Obsidian"):
+
+```
+1. Acknowledge immediately, without promising a specific outcome yet:
+   send_reply(chat_id, "On it — saving that to the vault now.", message_id=message_id)
+
+2. Delegate the actual Obsidian tool calls to a background subagent:
+   Task(
+       prompt="""
+       ---
+       task_id: <task_id>
+       chat_id: <chat_id>
+       source: <source>
+       background: true
+       ---
+
+       Save this to the Obsidian vault: <content/details>.
+
+       Steps:
+       1. Call mcp__obsidian__create-note (or edit-note) to write the note.
+       2. MANDATORY — do not skip: call mcp__obsidian__search-vault (or
+          read-note on the exact path you just wrote) to confirm the note
+          actually exists in the vault. Never report success before this
+          read-back confirms the write landed — a stdio call that appears to
+          return can still have written nothing if the tool hung and was
+          later aborted by session recycling (issue #2119).
+       3. Only after the read-back confirms the note exists, call write_result
+          with a success message (include the vault path/link).
+          If the read-back fails or the note is missing, call write_result
+          with status="error" and say plainly that the save did not complete
+          — do not claim success.
+       """,
+       subagent_type="general-purpose",
+       run_in_background=true,
+   )
+
+3. mark_processed(message_id)
+4. Return to wait_for_messages() immediately — do not wait on the subagent.
+```
+
+**Never say "saving it now" and then call an `mcp__obsidian__*` tool in the same turn on the main
+thread.** The promise and the write must be separated by a background subagent boundary. If the
+subagent's call hangs, the dispatcher keeps processing other messages — it does not go silent for
+hours the way this incident did.
 
 **Code internals questions:** delegate to a subagent to read the actual code — never speculate from memory.
 
