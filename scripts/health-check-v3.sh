@@ -125,6 +125,17 @@ DISPATCHER_HEARTBEAT_STALE_SECONDS=1200   # 20 min — covers compaction (~5m) +
 SESSION_AGE_LIMIT_SECONDS="${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-7200}"
 DISPATCHER_SESSION_START_FILE="${LOBSTER_DISPATCHER_SESSION_START_FILE_OVERRIDE:-$WORKSPACE_DIR/data/dispatcher-session-start.ts}"
 
+# Orphaned stdio MCP process reaper (issue #2119). Backstop for stdio MCP
+# children (obsidian-mcp specifically, pattern is generic) that survive a
+# session-age restart despite check_session_age()'s kill_dispatcher_children
+# call -- e.g. a restart that took the crash path instead of the graceful
+# SIGTERM path, or any other route that reparents an MCP child to PID 1
+# without signalling it. Threshold is one restart cycle (SESSION_AGE_LIMIT_SECONDS,
+# 7200s = 2h) plus a margin so we never race a process that is still
+# mid-reparenting from a restart that is in progress right now.
+ORPHAN_MCP_REAP_AGE_SECONDS="${LOBSTER_ORPHAN_MCP_REAP_AGE_SECONDS:-8100}"   # 2h15m
+ORPHAN_MCP_REAP_PATTERN="${LOBSTER_ORPHAN_MCP_REAP_PATTERN:-obsidian-mcp}"
+
 # WFM-active signal (issue #1713 / #949): inbox_server.py writes this file with
 # a Unix epoch timestamp when wait_for_messages begins blocking and refreshes it
 # every WAIT_HEARTBEAT_INTERVAL (60s). When this file is fresh, the dispatcher is
@@ -1493,6 +1504,17 @@ check_session_age() {
         return 0
     fi
 
+    # Snapshot the dispatcher's direct children BEFORE sending SIGTERM (issue
+    # #2119). This must happen first: once the dispatcher (`claude`) receives
+    # SIGTERM and exits, its children (stdio MCP servers like `obsidian-mcp`)
+    # are reparented away from $dispatcher_pid immediately — querying `pgrep -P
+    # $dispatcher_pid` AFTER the SIGTERM is a race that can find zero children
+    # even though they existed a moment earlier, because the parent is already
+    # gone by the time the query runs. Capturing the list first and signalling
+    # those specific PIDs afterward removes the race entirely.
+    local mcp_child_pids
+    mcp_child_pids=$(pgrep -P "$dispatcher_pid" 2>/dev/null || true)
+
     # Notify BEFORE sending SIGTERM (issue #2075) so the message reaches the user
     # even if the session exits immediately once SIGTERM is delivered — if the
     # alert were sent after kill -TERM, a fast process death could drop it
@@ -1513,6 +1535,18 @@ check_session_age() {
     # restarts Claude. This is a graceful exit, not a crash.
     if kill -TERM "$dispatcher_pid" 2>/dev/null; then
         log_warn "Session age: SIGTERM sent to dispatcher PID $dispatcher_pid"
+
+        # Also signal the dispatcher's direct child processes we snapshotted
+        # above -- stdio MCP servers like `obsidian-mcp` (issue #2119).
+        # SIGTERM to $dispatcher_pid only reaches the `claude` process itself;
+        # it does NOT cascade to stdio MCP children it spawned, which are
+        # simply orphaned (reparented to PID 1) rather than killed.
+        # obsidian-mcp specifically has no application-level timeout and can
+        # be mid-hang at the moment of this restart, so leaving it running
+        # produces exactly the orphan leak this issue reports: one stray
+        # process per session-age restart, accumulating indefinitely.
+        kill_dispatcher_children $mcp_child_pids
+
         # Delete the start timestamp so a subsequent health check run (within the
         # next 4 minutes) does not send a second SIGTERM before the restart completes.
         rm -f "$DISPATCHER_SESSION_START_FILE" 2>/dev/null || true
@@ -1520,6 +1554,150 @@ check_session_age() {
     else
         log_warn "Session age: SIGTERM to PID $dispatcher_pid failed (process may have exited already)"
         return 0
+    fi
+}
+
+#===============================================================================
+# kill_dispatcher_children — signal direct child processes of the dispatcher
+# (issue #2119)
+#
+# Why not signal the dispatcher's whole process group instead (kill -TERM
+# -$pgid)? That was the initial fix proposal, but it does not hold up against
+# the live process tree. Verified on the production host:
+#
+#   $ ps -o pid,ppid,pgid,sid,comm -p "$dispatcher_pid"
+#       PID    PPID    PGID     SID COMMAND
+#   4183042 2901787 2901787 2901787 claude
+#
+# The dispatcher's PGID (2901787) is NOT its own PID (4183042) -- it shares
+# its process group with claude-persistent.sh (PID 2901787), the supervisor
+# script that detects the dispatcher's exit and relaunches it, which in turn
+# runs under the tmux session leader. `kill -TERM -$dispatcher_pid` would
+# target a process group that doesn't exist (no-op); using the *real* PGID
+# instead would SIGTERM the supervisor and the tmux pane along with it,
+# breaking the auto-restart mechanism this entire flow depends on.
+#
+# Enumerating direct children of $dispatcher_pid (ps --ppid / pgrep -P) is
+# the safe alternative: it reaches every MCP child the dispatcher spawned
+# (obsidian-mcp, inbox_server.py, etc.) without touching anything above the
+# dispatcher in the process tree. A fresh set of children is spawned by the
+# next Claude launch regardless, so killing all current children here is
+# safe -- none of them have a reason to outlive this session.
+#
+# Takes the child PIDs as arguments (already-enumerated by the caller) rather
+# than a parent PID to enumerate itself. This matters: the caller must
+# snapshot the children BEFORE sending SIGTERM to the dispatcher, because
+# once the dispatcher exits its children are reparented away immediately —
+# enumerating *after* the SIGTERM is a race that can observe zero children
+# even though they existed a moment earlier.
+#===============================================================================
+kill_dispatcher_children() {
+    local child_pids="$*"
+
+    if [[ -z "${child_pids// /}" ]]; then
+        log_info "Session age: no child processes to signal"
+        return 0
+    fi
+
+    log_warn "Session age: signalling dispatcher child process(es): $(echo "$child_pids" | tr '\n' ' ')"
+
+    local sigterm_pids=()
+    local cpid
+    for cpid in $child_pids; do
+        if kill -TERM "$cpid" 2>/dev/null; then
+            sigterm_pids+=("$cpid")
+        fi
+    done
+
+    if [[ ${#sigterm_pids[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    # Brief grace period, then SIGKILL any child that ignored SIGTERM (e.g. a
+    # stdio MCP server hung inside a blocking call with no signal handling
+    # path that actually exits). Only SIGKILL PIDs we sent SIGTERM to, to
+    # avoid hitting an unrelated process that reused the PID during the wait.
+    sleep 2
+    for cpid in "${sigterm_pids[@]}"; do
+        if kill -0 "$cpid" 2>/dev/null; then
+            log_warn "Session age: child PID $cpid still alive after SIGTERM — sending SIGKILL"
+            kill -KILL "$cpid" 2>/dev/null || true
+        fi
+    done
+}
+
+#===============================================================================
+# reap_orphaned_mcp_processes — cron backstop for orphaned stdio MCP servers
+# (issue #2119)
+#
+# check_session_age()'s kill_dispatcher_children() is the primary fix: it
+# signals stdio MCP children (obsidian-mcp) at the moment of a session-age
+# restart, before they can be orphaned. This function is the backstop for
+# every path that primary fix does not cover -- a dispatcher crash (OOM,
+# hard kill, CC's 7440s hard limit firing before the proactive restart),
+# a restart on an older/rolled-back build without kill_dispatcher_children,
+# or any other route that reparents an MCP child to PID 1 without signalling
+# it first.
+#
+# Runs every health-check-v3.sh cycle (cron, every 4 minutes -- see
+# `# LOBSTER-HEALTH` in crontab), independent of whether a restart is
+# happening right now. Only targets processes that are BOTH:
+#   1. Reparented to init (PPID=1) -- i.e. actually orphaned, not a live
+#      MCP child of the current dispatcher session
+#   2. Older than ORPHAN_MCP_REAP_AGE_SECONDS (default 8100s = 2h15m, i.e.
+#      one full session-age restart cycle plus a 15-minute margin) -- this
+#      avoids racing a process that is still mid-reparenting from a restart
+#      that is in progress right this moment
+#===============================================================================
+reap_orphaned_mcp_processes() {
+    local pattern="$ORPHAN_MCP_REAP_PATTERN"
+    local max_age="$ORPHAN_MCP_REAP_AGE_SECONDS"
+
+    local candidate_pids
+    candidate_pids=$(pgrep -f "$pattern" 2>/dev/null || true)
+
+    if [[ -z "$candidate_pids" ]]; then
+        return 0
+    fi
+
+    local reaped=0
+    local pid
+    for pid in $candidate_pids; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            continue
+        fi
+
+        local ppid
+        ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [[ "$ppid" != "1" ]]; then
+            # Still has a live parent -- a legitimate MCP child of a current
+            # session, not an orphan. Leave it alone.
+            continue
+        fi
+
+        local etimes
+        etimes=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [[ -z "$etimes" || ! "$etimes" =~ ^[0-9]+$ ]]; then
+            continue
+        fi
+        if [[ "$etimes" -lt "$max_age" ]]; then
+            log_info "Orphan reaper: PID $pid matches '$pattern', PPID=1, but only ${etimes}s old (< ${max_age}s) — leaving it for now"
+            continue
+        fi
+
+        log_warn "Orphan reaper: killing orphaned MCP process PID $pid (matches '$pattern', PPID=1, age ${etimes}s >= ${max_age}s)"
+        if kill -TERM "$pid" 2>/dev/null; then
+            reaped=$((reaped + 1))
+            sleep 1
+            if kill -0 "$pid" 2>/dev/null; then
+                log_warn "Orphan reaper: PID $pid still alive after SIGTERM — sending SIGKILL"
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        fi
+    done
+
+    if [[ $reaped -gt 0 ]]; then
+        log_warn "Orphan reaper: reaped $reaped orphaned MCP process(es) matching '$pattern'"
     fi
 }
 
@@ -1899,6 +2077,13 @@ main() {
         fi
     fi
 
+    # --- Orphaned stdio MCP process reaper (issue #2119) ---
+    # Cheap (pgrep + ps on a handful of PIDs at most) and safe to run every
+    # cycle regardless of lifecycle state or boot grace -- it only ever acts
+    # on processes that are already reparented to PID 1 and past the age
+    # threshold, never on anything belonging to the current session.
+    reap_orphaned_mcp_processes
+
     # --- Always check systemd services (includes router/bot) ---
     if ! check_services; then
         level="RED"
@@ -2240,4 +2425,12 @@ if [[ "${1:-}" == "--clear-black" ]]; then
     exit 0
 fi
 
-main "$@"
+# Only run main when executed directly (cron, manual invocation). When this
+# script is sourced (e.g. `source health-check-v3.sh` from a test harness, to
+# exercise individual functions like check_session_age/kill_dispatcher_children/
+# reap_orphaned_mcp_processes in isolation), skip the auto-run so the caller
+# controls exactly what runs. No behavior change for the normal cron path --
+# BASH_SOURCE[0] == $0 is true whenever the script is invoked directly.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
