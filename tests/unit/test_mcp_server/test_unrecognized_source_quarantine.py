@@ -285,6 +285,51 @@ class TestUnrecognizedSourceQuarantine:
             "bot-talk message must be returned by check_inbox"
         )
 
+    def test_cmd_test_message_shape_passes_quarantine_guard(
+        self, inbox_server_dirs: dict
+    ):
+        """Regression test for issue #2201: `lobster test` (cmd_test in src/cli)
+        message shape must not be quarantined.
+
+        Before the fix, cmd_test wrote source="test" — never a member of
+        INBOX_MESSAGE_SOURCES since PR #1736 (issue #1735) introduced this
+        quarantine guard — so every `lobster test` invocation was silently
+        dead-lettered to failed/ despite the CLI printing a success message.
+
+        This uses the exact message shape cmd_test now produces: source=system,
+        type=self_check, chat_id=0, user_id=0, username=test_user.
+        """
+        inbox_dir = inbox_server_dirs["inbox"]
+        failed_dir = inbox_server_dirs["failed"]
+
+        msg = {
+            "id": "test_1234567890",
+            "source": "system",
+            "type": "self_check",
+            "chat_id": 0,
+            "user_id": 0,
+            "username": "test_user",
+            "user_name": "Test",
+            "text": "This is a test message. Please acknowledge.",
+            "timestamp": _iso(_BASE_TS),
+        }
+        (inbox_dir / "test_1234567890.json").write_text(json.dumps(msg))
+
+        from src.mcp.inbox_server import handle_check_inbox
+
+        result = asyncio.run(handle_check_inbox({}))
+
+        # Must not be quarantined
+        assert list(failed_dir.glob("*.json")) == [], (
+            "cmd_test's message shape (source=system, type=self_check) must not "
+            "be quarantined — both are registered in message_types.py"
+        )
+        # Must be returned to the dispatcher
+        result_text = result[0].text
+        assert "test_1234567890" in result_text, (
+            "cmd_test's test message must be returned by check_inbox, not silently dropped"
+        )
+
     def test_quarantine_guard_runs_with_source_filter(
         self, inbox_server_dirs: dict
     ):
