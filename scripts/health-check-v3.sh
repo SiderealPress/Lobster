@@ -1192,6 +1192,64 @@ check_disk() {
     return 0
 }
 
+# Check: load-bearing config.env keys present and non-empty (issue #2200)
+#
+# install.sh previously never ran upgrade.sh's migration runner at all, so a
+# host reimaged from an old backup (config.env restored, install.sh re-run)
+# could silently end up missing a key a migration was supposed to add — with
+# no signal until the failure mode the migration existed to prevent recurred
+# in production (concrete case: migration 96 / issue #2142's
+# CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT, which never applied after the 2026-08-09
+# reimage). install.sh now runs migrations unconditionally (see
+# scripts/lib/migrations.sh), which is the actual fix; this check is a
+# lightweight, independent tripwire so a gap of this class surfaces via log +
+# alert on an already-running host, rather than silently proceeding.
+#
+# Advisory only — never RED, never fed into do_restart(). A missing key is a
+# configuration problem, not a crashed process; restarting cannot fix it.
+#
+# Keep this list short and load-bearing only (keys whose absence causes a
+# real, previously-seen failure mode) — it is not meant to validate all of
+# config.env.
+REQUIRED_CONFIG_KEYS=(
+    # issue #2142 / migration 96 — without this, wait_for_messages() is
+    # aborted client-side by Claude Code's MCP idle-progress watchdog after
+    # ~300s, well short of its intended up-to-20h long-poll.
+    "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"
+    # migration 57 — required for authenticated MCP HTTP endpoints (e.g.
+    # push-calendar-token); missing it breaks Google Calendar token refresh.
+    "LOBSTER_INTERNAL_SECRET"
+)
+
+check_config_keys() {
+    if [[ ! -f "$CONFIG_ENV" ]]; then
+        log_error "CONFIG KEYS: config.env not found at $CONFIG_ENV"
+        return 1
+    fi
+
+    local missing=()
+    local key value
+    for key in "${REQUIRED_CONFIG_KEYS[@]}"; do
+        value=$(grep "^${key}=" "$CONFIG_ENV" 2>/dev/null | tail -1 | cut -d'=' -f2- | tr -d '[:space:]"')
+        if [[ -z "$value" ]]; then
+            missing+=("$key")
+        fi
+    done
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        log_info "CONFIG KEYS OK: all ${#REQUIRED_CONFIG_KEYS[@]} load-bearing config.env keys present"
+        return 0
+    fi
+
+    local missing_list
+    missing_list=$(IFS=', '; echo "${missing[*]}")
+    log_error "CONFIG KEYS MISSING: $missing_list — check $CONFIG_ENV (run scripts/upgrade.sh to reapply migrations)"
+    send_telegram_alert_deduped "config-keys-missing" "Lobster: config.env is missing load-bearing key(s): $missing_list.
+
+This can happen after a host reimage/restore if config.env was restored from an old backup, before migrations reapplied. Run ~/lobster/scripts/upgrade.sh to reapply missing migrations, or set the key(s) manually in $CONFIG_ENV."
+    return 1
+}
+
 # Check 8: Claude auth token validity
 # Uses `claude auth status` as the single source of truth.
 #
@@ -2174,6 +2232,12 @@ Update CLAUDE_CODE_OAUTH_TOKEN in ~/lobster-config/config.env, then restart lobs
             level="YELLOW"
         fi
     elif [[ $auth_rc -eq 1 && "$level" == "GREEN" ]]; then
+        level="YELLOW"
+    fi
+
+    # --- Load-bearing config.env keys present (advisory, issue #2200, never RED) ---
+
+    if ! check_config_keys && [[ "$level" == "GREEN" ]]; then
         level="YELLOW"
     fi
 
