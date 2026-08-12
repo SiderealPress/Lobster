@@ -3450,6 +3450,24 @@ else
     warn "MCP server registration may have failed. Check with: claude mcp list"
 fi
 
+# `claude mcp add` has no --timeout flag, so set a per-server MCP idle timeout
+# directly in ~/.claude.json. Without this, wait_for_messages (which can
+# legitimately block for up to CLAUDE_WFM_TIMEOUT_S seconds with no progress
+# by design) gets silently aborted client-side after CC's default ~300s idle
+# timeout and is retried, wasting a request every cycle. 75000000ms (~20.8h)
+# comfortably exceeds wait_for_messages' own max timeout (72000s / 20h).
+if [ -f "$HOME/.claude.json" ] && command -v jq >/dev/null 2>&1; then
+    TMP_CLAUDE_JSON=$(mktemp)
+    if jq '.mcpServers."lobster-inbox".timeout = 75000000' "$HOME/.claude.json" > "$TMP_CLAUDE_JSON" 2>/dev/null \
+        && [ -s "$TMP_CLAUDE_JSON" ]; then
+        mv "$TMP_CLAUDE_JSON" "$HOME/.claude.json"
+        success "Set lobster-inbox MCP idle timeout (75000000ms) in ~/.claude.json"
+    else
+        rm -f "$TMP_CLAUDE_JSON"
+        warn "Could not set lobster-inbox MCP idle timeout in ~/.claude.json"
+    fi
+fi
+
 #===============================================================================
 # Install CLI
 #===============================================================================
