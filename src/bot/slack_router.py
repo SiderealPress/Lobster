@@ -723,15 +723,19 @@ def _send_with_typing_indicator(channel_id: str, text: str, thread_ts: str | Non
         log.info("Updated placeholder → real reply in %s: %s...", channel_id, text[:50])
         return True
     except SlackApiError as exc:
-        # The placeholder "..." is already visible in Slack.  Returning False
-        # would leave the outbox file in place and trigger a duplicate send.
-        # Log the failure and return True to consume the outbox file.
+        # The placeholder "..." is already visible in Slack, but the update
+        # failed to replace it (e.g. msg_too_long) — the real content never
+        # reached the channel. Falling back to a direct chat.postMessage,
+        # exactly as _update_placeholder does, so the reply is never silently
+        # lost behind a stuck "..." placeholder. This leaves the orphaned
+        # placeholder visible above the real message, which is preferable to
+        # dropping the content entirely.
         log.warning(
             "chat.update failed for placeholder ts=%s in %s: %s — "
-            "placeholder remains visible; not re-queuing to avoid duplicate",
+            "falling back to postMessage so the reply is not lost",
             placeholder_ts, channel_id, exc,
         )
-        return True
+        return _send_direct(channel_id, text, thread_ts)
 
 
 # Backward-compatible alias -- code that imports OutboxHandler directly still works.
