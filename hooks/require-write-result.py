@@ -3,33 +3,8 @@
 Stop hook: ensure subagents call write_result before exiting.
 Injects a reminder if write_result was not called during the session.
 
-Dispatcher sessions are exempt — the dispatcher never calls write_result, so
-the check only applies to subagents.
-
-## Dispatcher detection (agent_id fast path — issue #2218)
-
-Dispatcher identity for this hook is determined via the `agent_id` fast path,
-NOT `session_role.is_dispatcher()`. Claude Code injects `agent_id` only into
-subagent Stop/SubagentStop payloads (the subagent's own Stop events, and the
-parent's SubagentStop event when a subagent finishes) — the dispatcher session
-never carries this field, for its entire lifetime.
-
-`is_dispatcher()` was the wrong tool for this job: it reads a one-shot startup
-flag file (`dispatcher-startup-flag`) that `inject-bootup-context.py` deletes
-immediately after `SessionStart`, by design (see `session_role.py`'s module
-docstring). Every dispatcher `Stop` event fires long after that deletion —
-i.e. essentially all of them — so `is_dispatcher()` always returned False for
-the dispatcher's own Stop events, misclassifying them as an unidentified
-subagent that never called `write_result`. Every `MAX_HOOK_FIRES`-th
-misclassified event emitted a spurious "SUBAGENT RECOVERY" message into the
-inbox with no recoverable content.
-
-The `agent_id` field, by contrast, is injected per-event by Claude Code itself
-based on the actual session type — it requires no persisted state and is valid
-for the dispatcher's entire session lifetime. This is the same pattern already
-used by `dispatcher-state-stop.py`, `thinking-heartbeat.py`, `catchup-gate.py`,
-and `post-compact-gate.py` for the same reason (see `dispatcher-state-stop.py`'s
-docstring, fixed for the analogous issue #1958).
+Dispatcher sessions (detected via session_role.is_dispatcher()) are exempt —
+the dispatcher never calls write_result, so the check only applies to subagents.
 
 When write_result was called, this hook also marks the session completed in
 agent_sessions.db synchronously — without relying on the unreliable server-side
@@ -108,10 +83,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Import shared session role utility. is_dispatcher() is intentionally NOT used
-# for the main dispatcher-exemption check — see module docstring, issue #2218.
+# Import shared session role utility.
 sys.path.insert(0, str(Path(__file__).parent))
-from session_role import get_session_id
+from session_role import is_dispatcher, get_session_id
 
 # JSON to emit on every successful (allow) exit — suppresses the
 # "Stop hook feedback: No stderr output" injection that CC 2.1.76+ produces
@@ -129,30 +103,6 @@ def _exit_ok() -> None:
     """Exit 0 with JSON that suppresses CC feedback injection."""
     print(_SILENT_OK)
     sys.exit(0)
-
-
-# The hook_input field injected by Claude Code into subagent Stop/SubagentStop
-# payloads only. Absent for the dispatcher's own Stop events, for the entire
-# lifetime of the dispatcher session — see module docstring, issue #2218.
-AGENT_ID_FIELD = "agent_id"
-
-
-def is_subagent_hook(hook_input: dict) -> bool:
-    """Return True if hook_input belongs to a subagent Stop/SubagentStop event.
-
-    Claude Code injects agent_id only into subagent hook payloads (a subagent's
-    own Stop events, and the parent's SubagentStop event when a subagent
-    finishes). The dispatcher session never carries this field.
-
-    Pure function — no file I/O, no subprocess calls, no imported helpers.
-    Mirrors the same fast-path pattern used by dispatcher-state-stop.py,
-    thinking-heartbeat.py, catchup-gate.py, and post-compact-gate.py.
-
-    Fail-open toward "not a subagent" (i.e. dispatcher) when agent_id is
-    absent or empty — matches those hooks' documented fail-open behavior for
-    unparseable/empty stdin, since the dispatcher never sets agent_id.
-    """
-    return bool(hook_input.get(AGENT_ID_FIELD))
 
 
 def _extract_write_result_task_ids(all_tool_use_items: list) -> list[str]:
@@ -494,9 +444,9 @@ def main():
         _exit_ok()  # If we can't read input, don't block
 
     # Dispatcher sessions are exempt — skip the write_result check.
-    # Uses the agent_id fast path, not session_role.is_dispatcher() — see
-    # module docstring and is_subagent_hook() for why (issue #2218).
-    if not is_subagent_hook(data):
+    # session_role.is_dispatcher() uses the marker file as primary signal and
+    # the transcript (which is present in Stop hooks) as fallback.
+    if is_dispatcher(data):
         _exit_ok()
 
     hook_event = data.get("hook_event_name", "")

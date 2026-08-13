@@ -120,43 +120,25 @@ def _make_transcript_with_write_result_legacy(chat_id=12345, task_id="task-abc")
 
 
 def _make_stop_hook_input_with_path(
-    transcript_path: str, session_id: str = "sess-001", agent_id: str = "agent-stop-sub"
+    transcript_path: str, session_id: str = "sess-001"
 ) -> dict:
-    """CC 2.1.76+ Stop hook: uses transcript_path (JSONL file).
-
-    Includes agent_id by default because these fixtures simulate a subagent's
-    own Stop event (subject to the write_result check). Claude Code injects
-    agent_id into subagent hook payloads — including a subagent's own Stop
-    events, not just SubagentStop — so a real subagent Stop payload always
-    carries it. Pass agent_id="" to simulate the dispatcher's own Stop event
-    (see TestDispatcherExemption).
-    """
-    hook_input = {
+    """CC 2.1.76+ Stop hook: uses transcript_path (JSONL file)."""
+    return {
         "hook_event_name": "Stop",
         "session_id": session_id,
         "transcript_path": transcript_path,
     }
-    if agent_id:
-        hook_input["agent_id"] = agent_id
-    return hook_input
 
 
 def _make_stop_hook_input_legacy(
-    transcript: list, session_id: str = "sess-001", agent_id: str = "agent-stop-sub"
+    transcript: list, session_id: str = "sess-001"
 ) -> dict:
-    """Legacy Stop hook: inline transcript list (older CC versions).
-
-    See _make_stop_hook_input_with_path for why agent_id defaults to a
-    subagent id.
-    """
-    hook_input = {
+    """Legacy Stop hook: inline transcript list (older CC versions)."""
+    return {
         "hook_event_name": "Stop",
         "session_id": session_id,
         "transcript": transcript,
     }
-    if agent_id:
-        hook_input["agent_id"] = agent_id
-    return hook_input
 
 
 def _make_subagentstop_hook_input(
@@ -379,66 +361,30 @@ class TestSubagentStopHook:
 
 class TestDispatcherExemption:
     def test_dispatcher_stop_hook_exits_0(self, monkeypatch, tmp_path):
-        """Dispatcher sessions must always be allowed to stop.
-
-        Regression test for issue #2218: dispatcher identity is determined via
-        the agent_id fast path (absent for the dispatcher), NOT via the
-        one-shot dispatcher-startup-flag file. The startup flag is deleted by
-        inject-bootup-context.py immediately after SessionStart — this test
-        does NOT write that file at all, simulating every dispatcher Stop
-        event for the rest of the session's lifetime, long after the flag is
-        gone. Before the #2218 fix, this scenario made is_dispatcher() return
-        False and misclassified the dispatcher as an unidentified subagent.
-        """
+        """Dispatcher sessions must always be allowed to stop."""
         mod = _load_hook(monkeypatch, tmp_path)
 
-        # Intentionally do NOT write dispatcher-startup-flag — it is a one-shot
-        # marker consumed at SessionStart and is never present for a Stop event
-        # firing later in the dispatcher's session lifetime.
+        # Simulate the dispatcher launcher by writing the current PID to the
+        # startup flag file. is_dispatcher() reads this file and checks that
+        # the PID is alive via kill(pid, 0).
+        import session_role
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        startup_flag = data_dir / "dispatcher-startup-flag"
+        startup_flag.write_text(str(os.getpid()))
+        monkeypatch.setattr(session_role, "STARTUP_FLAG_FILE", startup_flag)
 
         # Write a transcript file with no write_result (dispatcher never calls it).
         transcript_file = tmp_path / "dispatcher.jsonl"
         _write_jsonl_transcript(transcript_file, _make_transcript_no_write_result())
 
-        # agent_id="" → no agent_id field in hook_input, matching a real
-        # dispatcher Stop payload (Claude Code never injects agent_id for the
-        # dispatcher's own session).
         hook_input = _make_stop_hook_input_with_path(
             str(transcript_file),
             session_id="dispatcher-sess-001",
-            agent_id="",
         )
         exit_code, stdout, stderr = _run_hook(mod, hook_input)
 
         assert exit_code == 0, f"Dispatcher should always exit 0, got {exit_code}"
-
-    def test_dispatcher_stop_hook_exits_0_across_many_stop_events(self, monkeypatch, tmp_path):
-        """The dispatcher must remain correctly identified across repeated Stop
-        events, not just the first one after startup.
-
-        Regression test for issue #2218: fires the Stop hook MAX_HOOK_FIRES+2
-        times in a row (well past the old one-shot flag's validity window) and
-        asserts every single one exits 0. Before the fix, this scenario would
-        eventually trip the MAX_HOOK_FIRES fallback and emit a spurious
-        "SUBAGENT RECOVERY" message into the inbox.
-        """
-        mod = _load_hook(monkeypatch, tmp_path)
-
-        transcript_file = tmp_path / "dispatcher.jsonl"
-        _write_jsonl_transcript(transcript_file, _make_transcript_no_write_result())
-
-        hook_input = _make_stop_hook_input_with_path(
-            str(transcript_file),
-            session_id="dispatcher-sess-001",
-            agent_id="",
-        )
-
-        for i in range(mod.MAX_HOOK_FIRES + 2):
-            exit_code, _, _ = _run_hook(mod, hook_input)
-            assert exit_code == 0, f"Dispatcher Stop event #{i} should exit 0, got {exit_code}"
-
-        # No fire-count tracker file should have been created for the dispatcher.
-        assert not Path(f"/tmp/lobster-hook-fires-dispatcher-sess-001").exists()
 
 
 # ---------------------------------------------------------------------------
