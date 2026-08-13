@@ -30,7 +30,12 @@ HOOK = Path(__file__).parent.parent.parent / "hooks" / "require-write-result.py"
 
 
 def _build_transcript(*tool_names: str) -> str:
-    """Build a minimal hook transcript JSON containing the given tool calls."""
+    """Build a minimal hook transcript JSON containing the given tool calls.
+
+    Includes agent_id: Claude Code injects this field only into subagent hook
+    payloads (see hook module docstring, issue #2218) — these smoke tests
+    simulate a subagent session, so a real payload always carries it.
+    """
     messages = [
         {
             "role": "assistant",
@@ -40,11 +45,14 @@ def _build_transcript(*tool_names: str) -> str:
             ],
         }
     ]
-    return json.dumps({"transcript": messages})
+    return json.dumps({"agent_id": "smoke-test-agent", "transcript": messages})
 
 
 def _build_transcript_with_write_result_input(task_id: str, chat_id: int = 12345) -> str:
-    """Build a transcript where write_result was called with a specific task_id."""
+    """Build a transcript where write_result was called with a specific task_id.
+
+    Includes agent_id — see _build_transcript() docstring.
+    """
     messages = [
         {
             "role": "assistant",
@@ -62,7 +70,11 @@ def _build_transcript_with_write_result_input(task_id: str, chat_id: int = 12345
             ],
         }
     ]
-    return json.dumps({"session_id": "test-session-uuid-1234", "transcript": messages})
+    return json.dumps({
+        "session_id": "test-session-uuid-1234",
+        "agent_id": "smoke-test-agent",
+        "transcript": messages,
+    })
 
 
 def _run_hook(transcript_json: str) -> subprocess.CompletedProcess:
@@ -173,7 +185,7 @@ def test_reminder_emitted_when_transcript_is_empty():
     report back; the hook should fire here too and exit 2 to hard-block.
     """
     _clear_fire_count_files()
-    result = _run_hook(json.dumps({"transcript": []}))
+    result = _run_hook(json.dumps({"agent_id": "smoke-test-agent", "transcript": []}))
 
     assert result.returncode == 2, (
         f"Hook must exit 2 (hard-block) even when the transcript has no tool calls at all. "
@@ -193,22 +205,17 @@ def test_reminder_emitted_when_transcript_is_empty():
 def test_dispatcher_skips_enforcement(tmp_path):
     """C3: Hook emits nothing when the session is identified as the dispatcher.
 
-    The dispatcher is identified via the startup flag file (issue #1908): the
-    launcher writes its PID to ~/lobster-workspace/data/dispatcher-startup-flag
-    before exec-ing claude. The hook reads this file and checks the PID is alive.
+    The dispatcher is identified via the agent_id fast path (issue #2218):
+    Claude Code injects agent_id only into subagent hook payloads, never into
+    the dispatcher's own Stop payloads. No dispatcher-startup-flag file is
+    written or needed here — that one-shot marker (issue #1908) is deleted by
+    inject-bootup-context.py immediately after SessionStart and is absent for
+    virtually every dispatcher Stop event.
 
     Failure mode caught: if the hook fires for the dispatcher, every post-
     compact cycle would inject a spurious STOP message into the main loop,
     breaking the dispatcher's ability to resume normal message processing.
     """
-    # Simulate the dispatcher launcher by writing the current process PID to the
-    # startup flag file at LOBSTER_WORKSPACE/data/dispatcher-startup-flag.
-    # The test process is alive throughout the subprocess run, so kill(pid, 0)
-    # always succeeds.
-    startup_flag_dir = tmp_path / "data"
-    startup_flag_dir.mkdir(parents=True, exist_ok=True)
-    (startup_flag_dir / "dispatcher-startup-flag").write_text(str(os.getpid()))
-
     hook_input = {
         "session_id": "dispatcher-sess-001",
         "transcript": [
@@ -220,6 +227,7 @@ def test_dispatcher_skips_enforcement(tmp_path):
                 ],
             }
         ],
+        # No "agent_id" key — this is what makes it the dispatcher.
     }
 
     env = {**os.environ, "LOBSTER_WORKSPACE": str(tmp_path)}
@@ -240,6 +248,49 @@ def test_dispatcher_skips_enforcement(tmp_path):
         "Hook must produce no substantive output for dispatcher sessions. "
         f"Got: {result.stdout!r}"
     )
+
+
+def test_dispatcher_skips_enforcement_across_many_stop_events_no_startup_flag(tmp_path):
+    """Regression test for issue #2218.
+
+    Fires the hook many times in a row against a payload shaped exactly like
+    the dispatcher's own repeated Stop events, with no dispatcher-startup-flag
+    file present at any point (simulating the entire post-startup lifetime of
+    a real dispatcher session). Before the fix, this scenario made
+    session_role.is_dispatcher() return False on every call — because it
+    reads the one-shot startup flag, never anything persistent — misclassifying
+    the dispatcher as an unidentified subagent and eventually tripping the
+    MAX_HOOK_FIRES synthetic "SUBAGENT RECOVERY" fallback.
+    """
+    _clear_fire_count_files()
+    hook_input = {
+        "session_id": "dispatcher-sess-002",
+        "transcript": [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "mcp__lobster-inbox__wait_for_messages", "id": "call_0"},
+                ],
+            }
+        ],
+    }
+    env = {**os.environ, "LOBSTER_WORKSPACE": str(tmp_path)}
+
+    for i in range(7):  # well past MAX_HOOK_FIRES (5)
+        result = subprocess.run(
+            [sys.executable, str(HOOK)],
+            input=json.dumps(hook_input),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 0, (
+            f"Dispatcher Stop event #{i}: expected exit 0, got {result.returncode}."
+        )
+        # A dispatcher-classified event must produce no substantive output —
+        # in particular, none of the MAX_HOOK_FIRES fallback / STOP messaging.
+        assert result.stdout.strip() in ("", '{"suppressOutput": true}')
+        assert result.stderr.strip() == ""
 
 
 # ---------------------------------------------------------------------------
