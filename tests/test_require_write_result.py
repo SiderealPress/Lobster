@@ -320,47 +320,6 @@ class TestMarkSessionNotified:
 
 
 # ---------------------------------------------------------------------------
-# Tests: is_subagent_hook() — dispatcher-vs-subagent identity (issue #2218)
-# ---------------------------------------------------------------------------
-
-class TestIsSubagentHook:
-    """Pure-function tests for the agent_id fast path that replaced
-    session_role.is_dispatcher() for this hook's Stop/SubagentStop identity
-    check (issue #2218)."""
-
-    @pytest.fixture(autouse=True)
-    def _mod(self):
-        self.mod = _load_hook()
-
-    def test_true_when_agent_id_present(self):
-        """A non-empty agent_id means a subagent hook payload."""
-        assert self.mod.is_subagent_hook({"agent_id": "agent-xyz"}) is True
-
-    def test_false_when_agent_id_absent(self):
-        """No agent_id key at all means the dispatcher's own Stop event."""
-        assert self.mod.is_subagent_hook({}) is False
-
-    def test_false_when_agent_id_empty_string(self):
-        """An empty-string agent_id is treated the same as absent (falsy)."""
-        assert self.mod.is_subagent_hook({"agent_id": ""}) is False
-
-    def test_result_independent_of_dispatcher_startup_flag_state(self, tmp_path, monkeypatch):
-        """is_subagent_hook() does not read any state file — its result cannot
-        depend on whether the one-shot dispatcher-startup-flag file exists.
-
-        This is the crux of the issue #2218 fix: the old is_dispatcher() check
-        depended on a file that is guaranteed absent for the vast majority of
-        the dispatcher's Stop events. is_subagent_hook() reads only the
-        hook_input dict passed to it, so its result is stable regardless of
-        filesystem state.
-        """
-        # No dispatcher-startup-flag file exists in tmp_path at all.
-        monkeypatch.setenv("LOBSTER_WORKSPACE", str(tmp_path))
-        assert self.mod.is_subagent_hook({}) is False
-        assert self.mod.is_subagent_hook({"agent_id": "agent-xyz"}) is True
-
-
-# ---------------------------------------------------------------------------
 # Tests: main() via stdin injection
 # ---------------------------------------------------------------------------
 
@@ -373,9 +332,9 @@ class TestMainFlow:
         """main() exits 0 when write_result is called with a valid non-None chat_id."""
         transcript = _inline_transcript([_make_write_result_item(chat_id=12345)])
         data = {"transcript": transcript}
-        # The hook checks is_subagent_hook(data) (agent_id fast path — issue #2218)
-        # and imports get_session_id from session_role; patch both on the module.
-        with patch.object(self.mod, "is_subagent_hook", return_value=True), \
+        # The hook does `from session_role import is_dispatcher, get_session_id`
+        # so both names are bound directly on the module; patch them there.
+        with patch.object(self.mod, "is_dispatcher", return_value=False), \
              patch.object(self.mod, "get_session_id", return_value="sess-123"):
             code = _run_main(self.mod, data)
         assert code == 0
@@ -384,7 +343,7 @@ class TestMainFlow:
         """main() exits 2 when write_result was not called at all."""
         transcript = _inline_transcript([_make_other_tool_item()])
         data = {"transcript": transcript}
-        with patch.object(self.mod, "is_subagent_hook", return_value=True), \
+        with patch.object(self.mod, "is_dispatcher", return_value=False), \
              patch.object(self.mod, "get_session_id", return_value="sess-abc"):
             code = _run_main(self.mod, data)
         assert code == 2
@@ -392,7 +351,7 @@ class TestMainFlow:
     def test_exits_2_when_empty_transcript(self):
         """main() exits 2 for an empty transcript (no tools called at all)."""
         data = {"transcript": []}
-        with patch.object(self.mod, "is_subagent_hook", return_value=True), \
+        with patch.object(self.mod, "is_dispatcher", return_value=False), \
              patch.object(self.mod, "get_session_id", return_value="sess-empty"):
             code = _run_main(self.mod, data)
         assert code == 2
@@ -407,7 +366,7 @@ class TestMainFlow:
         }
         transcript = _inline_transcript([item])
         data = {"transcript": transcript}
-        with patch.object(self.mod, "is_subagent_hook", return_value=True), \
+        with patch.object(self.mod, "is_dispatcher", return_value=False), \
              patch.object(self.mod, "get_session_id", return_value="sess-xyz"):
             code = _run_main(self.mod, data)
         assert code == 2
@@ -416,7 +375,7 @@ class TestMainFlow:
         """main() exits 0 when chat_id=0 (valid dispatcher system route)."""
         transcript = _inline_transcript([_make_write_result_item(chat_id=0)])
         data = {"transcript": transcript}
-        with patch.object(self.mod, "is_subagent_hook", return_value=True), \
+        with patch.object(self.mod, "is_dispatcher", return_value=False), \
              patch.object(self.mod, "get_session_id", return_value="sess-bg"):
             code = _run_main(self.mod, data)
         assert code == 0
@@ -426,31 +385,10 @@ class TestMainFlow:
         # Dispatcher has no write_result call — still allowed.
         transcript = _inline_transcript([_make_other_tool_item()])
         data = {"transcript": transcript}
-        # The hook checks is_subagent_hook(data) directly (agent_id fast path —
-        # issue #2218); patch it on the loaded module object.
-        with patch.object(self.mod, "is_subagent_hook", return_value=False):
+        # The hook does `from session_role import is_dispatcher` so the name is
+        # bound directly on the loaded module object; patch it there.
+        with patch.object(self.mod, "is_dispatcher", return_value=True):
             code = _run_main(self.mod, data)
-        assert code == 0
-
-    def test_exits_0_for_dispatcher_stop_event_with_no_agent_id_no_mock(self):
-        """Regression test for issue #2218 — no mocking of dispatcher detection.
-
-        Real dispatcher Stop payloads never carry an "agent_id" key (Claude Code
-        injects it only into subagent hook payloads). This exercises the real
-        is_subagent_hook() implementation directly (not mocked) against a
-        payload shaped exactly like the dispatcher's own Stop event, with no
-        dispatcher-startup-flag file present — matching the one-shot-flag-
-        already-consumed state that holds for the entire dispatcher session
-        after the first few seconds of runtime.
-        """
-        transcript = _inline_transcript([_make_other_tool_item()])
-        data = {
-            "hook_event_name": "Stop",
-            "session_id": "dispatcher-sess-real",
-            "transcript": transcript,
-            # No "agent_id" key — this is what makes it the dispatcher.
-        }
-        code = _run_main(self.mod, data)
         assert code == 0
 
     def test_exits_2_with_pseudocode_message_on_stderr_when_write_result_in_text(self, capsys):
@@ -461,7 +399,7 @@ class TestMainFlow:
             text_items=["You should call mcp__lobster-inbox__write_result now."],
         )
         data = {"transcript": transcript}
-        with patch.object(self.mod, "is_subagent_hook", return_value=True), \
+        with patch.object(self.mod, "is_dispatcher", return_value=False), \
              patch.object(self.mod, "get_session_id", return_value="sess-pseudo"):
             code = _run_main(self.mod, data)
         assert code == 2
@@ -476,7 +414,7 @@ class TestMainFlow:
             [_make_write_result_item(task_id="my-task", chat_id=42)]
         )
         data = {"transcript": transcript}
-        with patch.object(self.mod, "is_subagent_hook", return_value=True), \
+        with patch.object(self.mod, "is_dispatcher", return_value=False), \
              patch.object(self.mod, "get_session_id", return_value="sess-mark"), \
              patch.object(self.mod, "_mark_session_completed") as mock_completed, \
              patch.object(self.mod, "_mark_session_notified") as mock_notified:
@@ -494,7 +432,7 @@ class TestMainFlow:
     def test_exits_2_when_missing_transcript_key(self):
         """main() exits 2 (no write_result) when transcript key is absent from data."""
         data = {}  # no "transcript" key — defaults to []
-        with patch.object(self.mod, "is_subagent_hook", return_value=True), \
+        with patch.object(self.mod, "is_dispatcher", return_value=False), \
              patch.object(self.mod, "get_session_id", return_value="sess-missing"):
             code = _run_main(self.mod, data)
         assert code == 2
@@ -517,7 +455,7 @@ class TestMainFlow:
         and allows the exit rather than blocking on incomplete information.
         """
         data = {"hook_event_name": "SubagentStop"}  # no agent_transcript_path
-        with patch.object(self.mod, "is_subagent_hook", return_value=True):
+        with patch.object(self.mod, "is_dispatcher", return_value=False):
             code = _run_main(self.mod, data)
         assert code == 0
 
@@ -538,7 +476,7 @@ class TestMainFlow:
             path = f.name
 
         data = {"hook_event_name": "SubagentStop", "agent_transcript_path": path}
-        with patch.object(self.mod, "is_subagent_hook", return_value=True), \
+        with patch.object(self.mod, "is_dispatcher", return_value=False), \
              patch.object(self.mod, "get_session_id", return_value="sess-jsonl"):
             code = _run_main(self.mod, data)
         assert code == 0
