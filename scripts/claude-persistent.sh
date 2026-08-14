@@ -388,10 +388,30 @@ kill_orphaned_mcp_processes() {
         # itself, but the service bounce still wiped in-memory session/lock state,
         # producing spurious session-lost-reminder / dispatcher-marked-dead
         # notifications with no actual dispatcher crash. See investigation for
-        # issues #2124 / #2142. The correct invocation takes the PID as a bare
-        # positional argument.
-        if systemctl status "$pid" >/dev/null 2>&1; then
-            log "CLEANUP: MCP PID $pid is a systemd-managed service — skipping"
+        # issues #2124 / #2142.
+        #
+        # #1551's fix ("pass the PID as a bare positional argument") replaced one
+        # bug with a subtler one (issue #2119): `systemctl status <pid>` does not
+        # ask "is this PID itself a systemd service" — it resolves the PID's
+        # cgroup to whichever unit owns that cgroup and reports THAT unit's
+        # status, exit 0, for *any* PID living anywhere inside it. Every process
+        # under lobster-claude.service's tmux session (the dispatcher, every MCP
+        # child it spawns, and any orphan reparented to PID 1 that still carries
+        # the same cgroup membership from when it was forked) resolves to
+        # lobster-claude.service and returns exit 0 — so this check has always
+        # treated every single MCP child, including hung/orphaned obsidian-mcp
+        # processes, as "systemd-managed" and skipped it. Confirmed empirically
+        # against live orphaned obsidian-mcp PIDs (PPID=1, one per session-age
+        # restart, accumulating indefinitely — see issue #2119).
+        #
+        # Fix: only the process that is actually the recorded MainPID of the
+        # protected unit should be skipped. Compare against MainPID directly
+        # instead of asking "does this PID's cgroup resolve to some unit".
+        local protected_service="${LOBSTER_MCP_SERVICE_NAME:-lobster-mcp.service}"
+        local protected_main_pid
+        protected_main_pid=$(systemctl show -p MainPID --value "$protected_service" 2>/dev/null || true)
+        if [[ -n "$protected_main_pid" && "$protected_main_pid" != "0" && "$pid" == "$protected_main_pid" ]]; then
+            log "CLEANUP: MCP PID $pid is the systemd-managed ${protected_service} MainPID — skipping"
             skipped=$((skipped + 1))
             continue
         fi
@@ -790,4 +810,10 @@ Claude persistent session initializing."
 trap 'log "Received SIGTERM, shutting down..."; write_state "stopped" "sigterm"; exit 0' SIGTERM
 trap 'log "Received SIGINT, shutting down..."; write_state "stopped" "sigint"; exit 0' SIGINT
 
-main "$@"
+# Only run main when executed directly. When sourced (e.g. by a test harness
+# exercising kill_orphaned_mcp_processes/kill_orphaned_claude_processes in
+# isolation), skip the auto-run so the caller controls exactly what runs.
+# No behavior change for the normal systemd/tmux launch path.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
