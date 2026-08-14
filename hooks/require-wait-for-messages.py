@@ -9,10 +9,28 @@ wait_for_messages. The health check catches this after ~12 minutes and
 restarts, causing ~30s of missed messages per incident.
 
 This hook fires on every Stop event (dispatcher or subagent). Subagent
-sessions are immediately exempted via session_role.is_dispatcher(). For the
-dispatcher, the hook scans the transcript: if wait_for_messages was not
-called, it exits 2 (blocking) so the dispatcher MUST call wait_for_messages
-before the turn ends.
+sessions are immediately exempted via the agent_id fast path (see "Dispatcher
+detection" below). For the dispatcher, the hook scans the transcript: if
+wait_for_messages was not called, it exits 2 (blocking) so the dispatcher
+MUST call wait_for_messages before the turn ends.
+
+## Dispatcher detection (agent_id fast path — issue #2218)
+
+This hook used to call session_role.is_dispatcher(), which reads a one-shot
+startup flag file that inject-bootup-context.py deletes immediately after
+SessionStart, by design. Because every dispatcher Stop event fires long after
+that deletion, is_dispatcher() always returned False for the dispatcher's own
+Stop events — meaning "only enforce for the dispatcher session" silently
+exempted the dispatcher from this check for the entire session, disabling the
+anti-stall protection this hook exists to provide (the dispatcher could end a
+turn without calling wait_for_messages and this hook would never block it).
+
+Fixed by switching to the agent_id fast path: Claude Code injects agent_id
+only into subagent hook payloads, never into the dispatcher's own Stop
+payloads — no persisted state required, valid for the dispatcher's entire
+session lifetime. Same pattern used by dispatcher-state-stop.py,
+thinking-heartbeat.py, catchup-gate.py, post-compact-gate.py, and
+require-write-result.py (fixed together for issue #2218).
 
 ## Why blocking (exit 2) instead of warn-only (exit 0)
 
@@ -67,7 +85,7 @@ on it without consulting external docs.
 
 The hook does NOT fire for:
 - Sessions without LOBSTER_MAIN_SESSION=1 (non-Lobster Claude Code sessions)
-- Subagent sessions (is_dispatcher() returns False)
+- Subagent sessions (agent_id present in hook_input)
 - Any session where wait_for_messages was called at least once in the transcript
 - Transcript read failures (I/O error → allow stop rather than false-positive block)
 - Graceful exit bypass: /tmp/lobster-graceful-exit file present (consumed on use)
@@ -77,16 +95,26 @@ import os
 import sys
 from pathlib import Path
 
-# Import shared session role utility.
-sys.path.insert(0, str(Path(__file__).parent))
-from session_role import is_dispatcher
-
 # JSON to emit on every successful (allow) exit — suppresses the
 # "Stop hook feedback: No stderr output" injection that CC 2.1.76+ produces
 # even when the hook exits 0 with no output.
 _SILENT_OK = json.dumps({"suppressOutput": True})
 
 _WFM_TOOL = "mcp__lobster-inbox__wait_for_messages"
+
+# The hook_input field injected by Claude Code into subagent hook payloads
+# only. Absent for the dispatcher's own Stop events, for the entire lifetime
+# of the dispatcher session — see module docstring, issue #2218.
+AGENT_ID_FIELD = "agent_id"
+
+
+def is_subagent_hook(hook_input: dict) -> bool:
+    """Return True if hook_input belongs to a subagent Stop event.
+
+    Pure function — no file I/O, no subprocess calls. See module docstring
+    ("Dispatcher detection") for why this replaced session_role.is_dispatcher().
+    """
+    return bool(hook_input.get(AGENT_ID_FIELD))
 
 _GRACEFUL_EXIT_FLAG = "/tmp/lobster-graceful-exit"
 
@@ -167,7 +195,7 @@ def main() -> None:
         _exit_ok()  # If we can't read input, don't block.
 
     # Only enforce for the dispatcher session.
-    if not is_dispatcher(data):
+    if is_subagent_hook(data):
         _exit_ok()
 
     # Load transcript: prefer file-based path (CC 2.1.76+), fall back to inline.
