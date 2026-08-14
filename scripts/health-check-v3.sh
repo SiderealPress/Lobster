@@ -115,14 +115,28 @@ HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"   # legacy WFM-touch signa
 DISPATCHER_HEARTBEAT_FILE="${LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-heartbeat}"
 DISPATCHER_HEARTBEAT_STALE_SECONDS=1200   # 20 min — covers compaction (~5m) + catchup (~12m) + margin
 
-# Session age limit: CC enforces a hard 7440s session lifetime (issue #2059).
-# At this limit, CC kills the process without firing the Stop hook — no tombstone,
-# no compaction alert. We trigger a graceful SIGTERM at SESSION_AGE_LIMIT_SECONDS
-# (7200s = 2 min before hard limit) so the Stop hook fires cleanly.
+# Session age limit: proactive SIGTERM restart mechanism (issue #2059).
+#
+# DISABLED BY DEFAULT (issue #2196 / #2157). This mechanism was originally
+# justified by a claimed "CC enforces a hard 7440s session lifetime" — but
+# issue #2157 found that claim rested on only 2 data points, was never
+# confirmed against Anthropic docs, and had a more likely alternative
+# explanation (an unrelated heartbeat-staleness bug, since fixed by #2074).
+# The live dispatcher session has since run 90+ hours with zero problems,
+# directly contradicting the original 7440s premise. There is no remaining
+# evidence that Claude Code kills sessions on a wall-clock timer.
+#
+# The mechanism itself still works and is harmless once opted into: when
+# enabled, it sends a graceful SIGTERM to the dispatcher PID at
+# SESSION_AGE_LIMIT_SECONDS so the Stop hook fires cleanly (vs. an
+# uncontrolled kill from some other layer, e.g. a systemd bounce). Keep it
+# available as an opt-in operational precaution — e.g. an operator who wants
+# a periodic recycle for unrelated reasons (log rotation, memory hygiene) —
+# but do not force it on new/updated installs by default.
+#
 # Written by inject-bootup-context.py as a plain Unix epoch integer.
-# Set LOBSTER_SESSION_AGE_LIMIT_SECONDS=0 in config.env to disable this check
-# (safe if CC no longer enforces the 7440s hard limit in the installed version).
-SESSION_AGE_LIMIT_SECONDS="${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-7200}"
+# Set LOBSTER_SESSION_AGE_LIMIT_SECONDS=<seconds> in config.env to opt in.
+SESSION_AGE_LIMIT_SECONDS="${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-0}"
 DISPATCHER_SESSION_START_FILE="${LOBSTER_DISPATCHER_SESSION_START_FILE_OVERRIDE:-$WORKSPACE_DIR/data/dispatcher-session-start.ts}"
 
 # WFM-active signal (issue #1713 / #949): inbox_server.py writes this file with
@@ -164,7 +178,7 @@ WFM_ACTIVE_STALE_SECONDS=180   # 3x WAIT_HEARTBEAT_INTERVAL (60s) — absorbs on
 # tighter than the session lifetime a legitimate idle wait is allowed to reach.
 # See compute_wfm_suppression_max_seconds() below.
 WFM_SUPPRESSION_MARGIN_SECONDS=300      # 5 min: fire slightly before the session-age backstop would anyway
-WFM_SUPPRESSION_FALLBACK_SECONDS=21600  # 6h: used only when SESSION_AGE_LIMIT_SECONDS=0 (session-age check disabled)
+WFM_SUPPRESSION_FALLBACK_SECONDS=21600  # 6h: used when SESSION_AGE_LIMIT_SECONDS=0 (the default as of issue #2196 — session-age check disabled)
 
 # Pure function: derive the WFM-active suppression cap from the session-age
 # limit. No side effects, no globals read — everything comes in as an argument,
@@ -240,7 +254,9 @@ fi
 LOBSTER_ENV="${LOBSTER_ENV:-production}"
 
 # Read LOBSTER_SESSION_AGE_LIMIT_SECONDS from config.env (if not already in environment).
-# Set to 0 in config.env to disable the proactive session-age restart check.
+# Default is 0 (disabled — see the comment near the initial assignment above,
+# issue #2196 / #2157). Set a positive integer in config.env to opt in to the
+# proactive session-age restart.
 if [[ -z "${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-}" && -f "$CONFIG_ENV" ]]; then
     _cfg_sal=$(grep '^LOBSTER_SESSION_AGE_LIMIT_SECONDS=' "$CONFIG_ENV" 2>/dev/null | cut -d'=' -f2- | tr -d '[:space:]"' || true)
     if [[ -n "$_cfg_sal" ]]; then
@@ -250,7 +266,7 @@ if [[ -z "${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-}" && -f "$CONFIG_ENV" ]]; then
 fi
 # Re-apply SESSION_AGE_LIMIT_SECONDS now that config.env may have updated the env var.
 # The initial assignment at top of file used the env var before config.env was read.
-SESSION_AGE_LIMIT_SECONDS="${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-7200}"
+SESSION_AGE_LIMIT_SECONDS="${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-0}"
 
 # Read LOBSTER_WFM_SUPPRESSION_MAX_SECONDS from config.env (if not already in
 # environment) for operators who want an explicit override instead of the
@@ -1415,20 +1431,28 @@ count_active_subagents() {
 }
 
 #===============================================================================
-# Session Age Check — proactive restart before the 7440s CC hard limit
-# (issue #2059)
+# Session Age Check — opt-in proactive restart on a wall-clock timer
+# (issue #2059; disabled by default as of issue #2196 — see #2157)
 #
-# CC enforces a hard 7440-second (124-minute) session lifetime. When this limit
-# is hit, CC exits without firing the Stop hook — no tombstone, no compact-
-# catchup. To avoid this, we send SIGTERM to the dispatcher process at
-# SESSION_AGE_LIMIT_SECONDS (7200s = 2 min before the limit), which fires the
-# Stop hook cleanly.
+# Originally justified by a claimed hard 7440-second CC session lifetime.
+# That claim is debunked: issue #2157 found the original evidence (issue
+# #2059) rested on only 2 data points, was never confirmed against Anthropic
+# docs, and had a more likely alternative explanation (an unrelated
+# heartbeat-staleness bug, fixed by #2074). The live dispatcher session has
+# since run 90+ hours with zero problems, directly contradicting the
+# original premise. There is no remaining evidence CC kills sessions on a
+# wall-clock timer, so this is DISABLED BY DEFAULT (SESSION_AGE_LIMIT_SECONDS=0).
 #
-# Unlike do_restart() (which uses systemctl), this sends SIGTERM directly to the
-# claude process so the Stop hook fires. The claude-persistent.sh wrapper detects
-# the exit and restarts Claude automatically.
+# When enabled (LOBSTER_SESSION_AGE_LIMIT_SECONDS set to a positive value in
+# config.env), this sends SIGTERM to the dispatcher process once the session
+# reaches SESSION_AGE_LIMIT_SECONDS, so the Stop hook fires cleanly instead
+# of an uncontrolled kill from some other layer. Unlike do_restart() (which
+# uses systemctl), this sends SIGTERM directly to the claude process so the
+# Stop hook fires. The claude-persistent.sh wrapper detects the exit and
+# restarts Claude automatically.
 #
 # Suppressed when:
+#   - SESSION_AGE_LIMIT_SECONDS=0 (the default — check is disabled entirely)
 #   - DISPATCHER_SESSION_START_FILE is missing (old install, no session tracking)
 #   - Maintenance mode is active (flag is present — handled in main before this call)
 #   - Boot grace period is active (avoid killing a session that just started)
