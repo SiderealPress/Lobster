@@ -77,6 +77,38 @@ _CATEGORY_NETWORK_ERROR = _mod._CATEGORY_NETWORK_ERROR
 _CATEGORY_TIMEOUT = _mod._CATEGORY_TIMEOUT
 _CATEGORY_MALFORMED_RESPONSE = _mod._CATEGORY_MALFORMED_RESPONSE
 
+_real_default_failopen_log_path = _mod._default_failopen_log_path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_failopen_log_default(tmp_path, monkeypatch):
+    """Guard against production log pollution from fail-open logging.
+
+    ``_default_failopen_log_path(env)`` falls back to
+    ``Path.home() / "lobster-workspace"`` whenever the ``env`` dict passed to
+    ``run()`` / ``log_failopen_event()`` has no ``LOBSTER_WORKSPACE`` key.
+    Most tests in this file build ad-hoc env dicts to exercise mode gating /
+    API-key precedence and don't set ``LOBSTER_WORKSPACE`` (and don't pass
+    ``failopen_log_path`` either), so without this guard every test that hits
+    a fail-open path (missing API key, timeout, malformed response, ...)
+    wrote synthetic JSONL records straight into the real production
+    ``~/lobster-workspace/logs/pii-scan-guard-failopen.jsonl``.
+
+    This wraps the real function rather than stubbing it out: when a test
+    explicitly supplies ``LOBSTER_WORKSPACE`` in ``env`` (as
+    ``test_default_log_path_resolves_under_lobster_workspace`` does, to
+    verify the real resolution logic), that real logic still runs unchanged.
+    Otherwise, writes are redirected to a per-test ``tmp_path`` so nothing
+    can escape the sandbox.
+    """
+
+    def _fake(env):
+        if "LOBSTER_WORKSPACE" in env:
+            return _real_default_failopen_log_path(env)
+        return tmp_path / "unset-workspace-logs" / _mod._FAILOPEN_LOG_FILENAME
+
+    monkeypatch.setattr(_mod, "_default_failopen_log_path", _fake)
+
 
 # ---------------------------------------------------------------------------
 # parse_pre_push_refs
