@@ -953,15 +953,16 @@ EOF
     # write directly to /var/spool/cron/crontabs/$USER (group-writable directory) without
     # needing the setgid bit. Requires sudo; warns and skips if sudo is unavailable.
     local CRONTAB_DIR="/var/spool/cron/crontabs"
-    if [ -d "$CRONTAB_DIR" ] && ! id -nG "$USER" | grep -qw "crontab"; then
+    local migration_46_user="${USER:-$(whoami)}"
+    if [ -d "$CRONTAB_DIR" ] && ! id -nG "$migration_46_user" | grep -qw "crontab"; then
         if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-            sudo usermod -aG crontab "$USER" 2>/dev/null && {
-                substep "Added $USER to the crontab group (fixes NoNewPrivs crontab permission error)"
+            sudo usermod -aG crontab "$migration_46_user" 2>/dev/null && {
+                substep "Added $migration_46_user to the crontab group (fixes NoNewPrivs crontab permission error)"
                 migrated=$((migrated + 1))
                 warn "Group membership change takes effect at next login. Run 'newgrp crontab' or restart the Lobster service to apply immediately."
-            } || warn "Failed to add $USER to crontab group — run: sudo usermod -aG crontab $USER"
+            } || warn "Failed to add $migration_46_user to crontab group — run: sudo usermod -aG crontab $migration_46_user"
         else
-            warn "Cannot add $USER to crontab group (sudo unavailable). Run manually: sudo usermod -aG crontab $USER"
+            warn "Cannot add $migration_46_user to crontab group (sudo unavailable). Run manually: sudo usermod -aG crontab $migration_46_user"
             warn "Until this is done, create_scheduled_job/update_scheduled_job/delete_scheduled_job will fail to sync crontab."
         fi
     fi
