@@ -98,6 +98,32 @@ catch {
     close $fh
 }
 
+# Write the dispatcher.pid file, mirroring scripts/claude-persistent.sh
+# (which writes $MESSAGES_DIR/config/dispatcher.pid right before exec-ing
+# claude). health-check-v3.sh's check_session_age() reads this file to find
+# the PID to send a graceful SIGTERM to once the session passes
+# SESSION_AGE_LIMIT_SECONDS.
+#
+# Before this fix, claude-wrapper.exp never wrote dispatcher.pid, so the
+# graceful SESSION AGE LIMIT restart path could never find a PID while
+# running in debug mode (LOBSTER_DEBUG=true) — it silently logged
+# "no dispatcher.pid — cannot send SIGTERM" and took no action, every
+# 4-minute health-check tick, for as long as the session stayed over-age
+# (see issue #2196: 4,148 occurrences in health-check.log since 2026-06-07).
+#
+# Same LOBSTER_MESSAGES fallback as claude-persistent.sh/health-check-v3.sh
+# (MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}") — must stay in sync
+# with both so the writer and reader always agree on the path.
+set messages_dir [expr {[info exists ::env(LOBSTER_MESSAGES)] ? $::env(LOBSTER_MESSAGES) : "$::env(HOME)/messages"}]
+set dispatcher_pid_dir [file join $messages_dir "config"]
+set dispatcher_pid_file [file join $dispatcher_pid_dir "dispatcher.pid"]
+catch { file mkdir $dispatcher_pid_dir }
+catch {
+    set pid_fh [open $dispatcher_pid_file w]
+    puts $pid_fh [exp_pid]
+    close $pid_fh
+}
+
 # Wait for either the permissions dialog OR the ready prompt.
 #
 # The ❯ (U+276F) character appears in the prompt area surrounded by ANSI escape
@@ -152,3 +178,11 @@ send "\r"
 # Hand over terminal control — Claude runs indefinitely.
 # The expect process stays alive so the spawned claude process is not orphaned.
 interact
+
+# interact returns once the spawned claude process exits (or EOF). Clean up
+# dispatcher.pid now that the PID it names is gone — mirrors
+# claude-persistent.sh's `rm -f "$dispatcher_pid_file"` after its claude
+# process exits. Leaving a stale dispatcher.pid around risks a future,
+# unrelated process being assigned the same PID and incorrectly targeted by
+# health-check-v3.sh's check_session_age() SIGTERM.
+catch { file delete $dispatcher_pid_file }

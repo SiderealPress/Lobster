@@ -26,8 +26,24 @@
 # Key behavioral assertion (issue #2074): WFM-active suppression is time-bounded.
 # A frozen dispatcher's WFM daemon thread continues refreshing the WFM-active file
 # every 60s independently of the main asyncio loop. File freshness alone does NOT
-# prove the dispatcher is responsive. After WFM_SUPPRESSION_MAX_SECONDS (2700s)
-# of heartbeat staleness, RED fires regardless of WFM-active freshness.
+# prove the dispatcher is responsive. Once the heartbeat has been stale for
+# WFM_SUPPRESSION_MAX_SECONDS, RED fires regardless of WFM-active freshness.
+# Tests 9-15 exercise the *mechanism* directly with an injected cap value, so
+# they remain valid regardless of what the derived default happens to be.
+#
+# Derivation tests (issue #2074, second incident, 2026-08-03):
+#   16. compute_wfm_suppression_max_seconds(): normal case derives limit - margin
+#   17. compute_wfm_suppression_max_seconds(): session-age check disabled (0) → fallback
+#   18. compute_wfm_suppression_max_seconds(): margin >= limit clamps to 1, never <= 0
+#   19. Regression — a heartbeat stale for 3000s (RED under the old fixed 2700s
+#       cap) with a fresh WFM-active file is GREEN under the derived default
+#       (SESSION_AGE_LIMIT_SECONDS=7200, margin=300 => cap=6900). This is the
+#       exact false-positive that caused hourly restarts on 2026-08-03: a
+#       perfectly healthy dispatcher idling in wait_for_messages for ~50 minutes.
+#   20. A heartbeat stale beyond the derived cap (6900s) with WFM-active fresh
+#       is still RED — the cap still catches a truly frozen dispatcher, it is
+#       just no longer tighter than the session lifetime a legitimate idle wait
+#       is allowed to reach.
 #
 # Usage: bash tests/test-health-check-dispatcher-heartbeat.sh
 #===============================================================================
@@ -63,6 +79,11 @@ assert_exit() {
     if [[ "$actual" -eq "$expected" ]]; then pass; else fail "expected exit $expected, got $actual"; fi
 }
 
+assert_eq() {
+    local actual="$1" expected="$2"
+    if [[ "$actual" -eq "$expected" ]]; then pass; else fail "expected $expected, got $actual"; fi
+}
+
 # Source check_dispatcher_heartbeat() from the health check script once.
 LOG_FILE="$TEST_LOG_DIR/health-check.log"
 DISPATCHER_HEARTBEAT_STALE_SECONDS=1200
@@ -78,8 +99,9 @@ log_info()  { log INFO "$1"; }
 log_warn()  { log WARN "$1"; }
 log_error() { log ERROR "$1"; }
 
-# Load the function definition from the health check script.
+# Load the function definitions from the health check script.
 eval "$(sed -n '/^check_dispatcher_heartbeat()/,/^}/p' "$HEALTH_SCRIPT")" 2>/dev/null
+eval "$(sed -n '/^compute_wfm_suppression_max_seconds()/,/^}/p' "$HEALTH_SCRIPT")" 2>/dev/null
 
 # Run check_dispatcher_heartbeat() with the given heartbeat file.
 # Returns the function's exit code via $?.
@@ -269,6 +291,90 @@ write_wfm_active 5
 run_check_with_wfm $(( WFM_SUPPRESSION_MAX_SECONDS - 200 )) && rc=$? || rc=$?
 remove_wfm_active
 assert_exit "$rc" 0
+
+# ===================================================================
+# compute_wfm_suppression_max_seconds() derivation tests
+# (issue #2074, second incident — 2026-08-03 hourly false-positive restarts)
+#
+# These test the pure derivation function directly: given a session-age
+# limit and a margin, it returns limit - margin, with a fallback for the
+# session-age-check-disabled case and a floor so it never returns <= 0.
+# ===================================================================
+
+echo ""
+echo "--- compute_wfm_suppression_max_seconds() derivation tests ---"
+
+# -------------------------------------------------------------------
+# Test 16: Normal case — derives session_age_limit - margin
+# -------------------------------------------------------------------
+begin_test "compute_wfm_suppression_max_seconds(7200, 300, 21600) == 6900"
+result=$(compute_wfm_suppression_max_seconds 7200 300 21600)
+assert_eq "$result" 6900
+
+# -------------------------------------------------------------------
+# Test 17: Session-age check disabled (limit=0) → returns fallback
+# -------------------------------------------------------------------
+begin_test "compute_wfm_suppression_max_seconds(0, 300, 21600) == 21600 (fallback)"
+result=$(compute_wfm_suppression_max_seconds 0 300 21600)
+assert_eq "$result" 21600
+
+# -------------------------------------------------------------------
+# Test 18: Margin >= limit clamps to 1, never <= 0
+# A cap of 0 or negative would make check_dispatcher_heartbeat() fire RED
+# on every single stale-heartbeat check regardless of WFM-active — worse
+# than having no cap at all. Must clamp to a positive floor.
+# -------------------------------------------------------------------
+begin_test "compute_wfm_suppression_max_seconds(300, 300, 21600) clamps to 1 (not 0)"
+result=$(compute_wfm_suppression_max_seconds 300 300 21600)
+assert_eq "$result" 1
+
+begin_test "compute_wfm_suppression_max_seconds(100, 300, 21600) clamps to 1 (not negative)"
+result=$(compute_wfm_suppression_max_seconds 100 300 21600)
+assert_eq "$result" 1
+
+# ===================================================================
+# Regression tests: legitimate multi-hour idle no longer false-positives
+# (issue #2074, second incident)
+#
+# Reproduces the exact 2026-08-03 failure mode using the production-derived
+# default (SESSION_AGE_LIMIT_SECONDS=7200, margin=300 => cap=6900) instead
+# of the old fixed 2700s literal, and confirms a truly stale heartbeat
+# beyond the new cap still fires RED.
+# ===================================================================
+
+echo ""
+echo "--- Regression: legitimate multi-hour idle no longer false-positives ---"
+
+PRODUCTION_DEFAULT_CAP=$(compute_wfm_suppression_max_seconds 7200 300 21600)
+
+# -------------------------------------------------------------------
+# Test 19: Heartbeat stale 3000s (would have been RED under the old fixed
+# 2700s cap) + WFM-active fresh → GREEN under the derived default.
+# This is the exact scenario that paged the user hourly on 2026-08-03: a
+# healthy dispatcher idling in wait_for_messages for ~50 minutes.
+# -------------------------------------------------------------------
+begin_test "Stale hb (3000s, RED under old 2700s cap) + WFM-active fresh → GREEN under derived cap (${PRODUCTION_DEFAULT_CAP}s)"
+WFM_SUPPRESSION_MAX_SECONDS="$PRODUCTION_DEFAULT_CAP"
+write_wfm_active 5
+run_check_with_wfm 3000 && rc=$? || rc=$?
+remove_wfm_active
+assert_exit "$rc" 0
+
+# -------------------------------------------------------------------
+# Test 20: Heartbeat stale beyond the derived cap + WFM-active fresh →
+# still RED. The cap still catches a truly frozen dispatcher; it is just
+# no longer tighter than the session lifetime a legitimate idle wait is
+# allowed to reach.
+# -------------------------------------------------------------------
+begin_test "Stale hb (beyond derived cap ${PRODUCTION_DEFAULT_CAP}s) + WFM-active fresh → RED"
+WFM_SUPPRESSION_MAX_SECONDS="$PRODUCTION_DEFAULT_CAP"
+write_wfm_active 5
+run_check_with_wfm $(( PRODUCTION_DEFAULT_CAP + 100 )) && rc=$? || rc=$?
+remove_wfm_active
+assert_exit "$rc" 2
+
+# Restore the mechanism-test cap for anything appended after this point.
+WFM_SUPPRESSION_MAX_SECONDS=2700
 
 # -------------------------------------------------------------------
 # Summary

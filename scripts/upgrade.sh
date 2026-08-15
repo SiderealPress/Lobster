@@ -3267,6 +3267,53 @@ M88_PYEOF
         substep "Migration 97: settings.json or jq not found — skipping"
     fi
 
+    # Migration 98: Register agent-git-push-guard.py PreToolUse hook.
+    # Closes the gap where an agent (dispatcher or subagent) running `git push`
+    # via its Bash tool has no TTY, so .githooks/pre-push's interactive
+    # confirm-and-abort PII/secrets prompt silently degrades to warn-only and
+    # the push proceeds anyway. This hook fires on Bash commands shaped like
+    # `git push` targeting the public SiderealPress/lobster repo, scans the
+    # outgoing diff using the same pattern tables as .githooks/pre-push
+    # (ported to Python in hooks/git_push_scan.py), and blocks (exit 2) on a
+    # finding -- the stderr message is injected into the calling agent's own
+    # next turn, which must assess and fix or explain-and-retry. Zero
+    # Anthropic API calls anywhere in the hook; see hooks/agent-git-push-guard.py
+    # docstring for the full design rationale.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        local _m98_present
+        _m98_present=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]? |
+             select((.command // "") | test("agent-git-push-guard"))]
+            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+
+        if [[ "${_m98_present:-0}" -eq 0 ]]; then
+            local _m98_tmp
+            _m98_tmp=$(mktemp)
+            chmod +x "$LOBSTER_DIR/hooks/agent-git-push-guard.py" 2>/dev/null || true
+            if jq --arg install_dir "$LOBSTER_DIR" '
+                .hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": ("python3 " + $install_dir + "/hooks/agent-git-push-guard.py"),
+                        "timeout": 15
+                    }]
+                }]
+            ' "$CLAUDE_SETTINGS" > "$_m98_tmp" \
+                && mv "$_m98_tmp" "$CLAUDE_SETTINGS" 2>/dev/null; then
+                substep "Migration 98: registered agent-git-push-guard.py PreToolUse hook"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$_m98_tmp" 2>/dev/null || true
+                warn "Migration 98: could not update settings.json — jq transform failed"
+            fi
+        else
+            substep "Migration 98: agent-git-push-guard.py hook already registered — skipping"
+        fi
+    else
+        substep "Migration 98: settings.json or jq not found — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else

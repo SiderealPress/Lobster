@@ -4539,6 +4539,13 @@ def _get_owner_chat_id_and_source() -> tuple[int | str | None, str]:
         return None, "telegram"
 
 
+# Marker inserted by hooks/require-write-result.py's _write_synthetic_inbox_message
+# to separate the fixed preamble from actual salvaged transcript content. Its
+# presence/absence in a subagent_recovered message's text is the single source of
+# truth for whether anything real was recovered — see _enqueue_recovery_notification.
+_RECOVERY_CONTENT_MARKER = "Recovered content:\n\n"
+
+
 def _enqueue_recovery_notification(msg: dict) -> None:
     """Write a subagent_notification to the owner's inbox when a subagent_recovered event arrives.
 
@@ -4547,9 +4554,30 @@ def _enqueue_recovery_notification(msg: dict) -> None:
     to the owner's chat_id (resolved from config.env) — not to the original
     chat_id carried by the recovery message, which is always 0 (unknown).
 
+    Suppression (issue #2175): when the salvaged transcript content is empty —
+    i.e. the SubagentStop fallback found nothing worth recovering — no owner-facing
+    Telegram notification is written. This is the case for phantom/harness-noise
+    SubagentStop fires (no real agent work was ever lost) and was, empirically, the
+    entire content of a ~140-notification overnight spam incident. The internal
+    subagent_recovered message this is derived from is written unconditionally by
+    the hook regardless of this suppression, and still flows through the dispatcher
+    for mark_processed as before — only the owner-facing push is suppressed here.
+    When there IS salvaged content, the notification is still sent unchanged: that
+    case represents real, potentially-lost work the owner should know about.
+
     Best-effort: any failure is logged but never raises.
     """
     try:
+        task_id = msg.get("task_id") or "unknown"
+        raw_text = msg.get("text", "")
+
+        if _RECOVERY_CONTENT_MARKER not in raw_text:
+            log.info(
+                f"subagent_recovered: task {task_id!r} had no salvageable transcript "
+                "content — suppressing owner Telegram notification (issue #2175)"
+            )
+            return
+
         owner_chat_id, owner_source = _get_owner_chat_id_and_source()
         if owner_chat_id is None:
             log.warning(
@@ -4558,20 +4586,12 @@ def _enqueue_recovery_notification(msg: dict) -> None:
             )
             return
 
-        task_id = msg.get("task_id") or "unknown"
-        raw_text = msg.get("text", "")
-
-        # Extract a brief summary (first 300 chars of salvaged content, if any).
-        summary_marker = "Recovered content:\n\n"
-        summary: str
-        if summary_marker in raw_text:
-            salvaged = raw_text.split(summary_marker, 1)[1]
-            summary = salvaged[:300].strip()
-            if len(salvaged) > 300:
-                summary += "…"
-            summary_line = f"Last known activity: {summary}"
-        else:
-            summary_line = "No recoverable transcript content was found."
+        # Extract a brief summary (first 300 chars of salvaged content).
+        salvaged = raw_text.split(_RECOVERY_CONTENT_MARKER, 1)[1]
+        summary = salvaged[:300].strip()
+        if len(salvaged) > 300:
+            summary += "…"
+        summary_line = f"Last known activity: {summary}"
 
         notification_text = (
             f"Agent `{task_id}` failed to write a result (exited without calling write_result).\n"
