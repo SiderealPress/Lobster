@@ -230,6 +230,71 @@ class TestTestCommand:
         files = list(inbox.glob("test_*.json"))
         assert len(files) >= 0  # May not exist if HOME doesn't match
 
+    def test_message_uses_registered_source_and_self_check_type(
+        self, cli_path: Path, temp_messages_dir: Path
+    ):
+        """Regression test for issue #2201.
+
+        cmd_test previously wrote source="test", which is not (and never was)
+        a member of INBOX_MESSAGE_SOURCES (src/mcp/message_types.py). Since
+        PR #1736 (issue #1735) added source-quarantine, every `lobster test`
+        run was silently dead-lettered to failed/ despite the CLI printing a
+        "should process shortly" success message.
+
+        Fix: write source="system" (a registered source, matching the sibling
+        fix already applied to daily-health-check.sh) and type="self_check"
+        explicitly (self_check is a registered INBOX_SYSTEM_TYPES member and
+        is not in USER_FACING_TYPES, so a chat_id=0 message with this type
+        will not be mistaken for a user-facing message needing a reply).
+        """
+        inbox = temp_messages_dir / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+
+        env = os.environ.copy()
+        env["HOME"] = str(temp_messages_dir.parent)
+        env.pop("LOBSTER_MESSAGES", None)
+
+        result = subprocess.run(
+            ["bash", str(cli_path), "test"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 0, f"lobster test failed: {result.stderr}"
+
+        files = list(inbox.glob("test_*.json"))
+        assert len(files) == 1, f"Expected exactly one test_*.json file, got {files}"
+
+        msg = json.loads(files[0].read_text())
+        assert msg["source"] == "system", (
+            f"cmd_test must write source='system' (registered in INBOX_MESSAGE_SOURCES), "
+            f"got source={msg.get('source')!r}"
+        )
+        assert msg["type"] == "self_check", (
+            f"cmd_test must write type='self_check' (registered in INBOX_SYSTEM_TYPES), "
+            f"got type={msg.get('type')!r}"
+        )
+
+        # Cross-check against the live taxonomy so this test breaks if the
+        # constants ever change underneath it.
+        import sys as _sys
+        mcp_dir = str(Path(__file__).parent.parent.parent.parent / "src" / "mcp")
+        if mcp_dir not in _sys.path:
+            _sys.path.insert(0, mcp_dir)
+        from message_types import INBOX_MESSAGE_SOURCES, INBOX_SYSTEM_TYPES, USER_FACING_TYPES
+
+        assert msg["source"] in INBOX_MESSAGE_SOURCES, (
+            f"cmd_test source {msg['source']!r} is not in INBOX_MESSAGE_SOURCES — "
+            "it would be quarantined to failed/ by the inbox server's source guard"
+        )
+        assert msg["type"] in INBOX_SYSTEM_TYPES, (
+            f"cmd_test type {msg['type']!r} is not in INBOX_SYSTEM_TYPES"
+        )
+        assert msg["type"] not in USER_FACING_TYPES, (
+            f"cmd_test type {msg['type']!r} must not be user-facing — "
+            "the message carries chat_id=0 and is not a real user conversation"
+        )
+
 
 class TestUnknownCommand:
     """Tests for unknown command handling."""
