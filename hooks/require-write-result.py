@@ -10,6 +10,12 @@ When write_result was called, this hook also marks the session completed in
 agent_sessions.db synchronously — without relying on the unreliable server-side
 auto-unregister path in inbox_server.py.
 
+It also appends a "done" entry to inflight-work.jsonl for each task_id seen in
+a valid write_result call (see `_append_inflight_done_entry`), automating the
+bookkeeping step documented in .claude/sys.dispatcher.bootup.md's "In-Flight
+Work Tracking" section that previously depended on the dispatcher manually
+running a Bash append after every subagent_result message.
+
 ## Session ID strategy
 
 The SubagentStop hook receives a session_id that is CC's internal UUID for the
@@ -125,6 +131,50 @@ def _extract_write_result_task_ids(all_tool_use_items: list) -> list[str]:
                 seen.add(tid)
                 result.append(tid)
     return result
+
+
+# inflight-work.jsonl path -- override via env var for testability, matching
+# the convention used by scripts/save-inflight-prompt.py and on-fresh-start.py.
+INFLIGHT_WORK_FILE = Path(
+    os.environ.get(
+        "LOBSTER_INFLIGHT_WORK_FILE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/data/inflight-work.jsonl"),
+    )
+)
+
+
+def _append_inflight_done_entry(task_id: str) -> None:
+    """Best-effort: append a 'done' entry to inflight-work.jsonl for task_id.
+
+    Automates the "done" bookkeeping write that was previously a manual
+    dispatcher step performed inline while handling subagent_result messages
+    (see .claude/sys.dispatcher.bootup.md, "In-Flight Work Tracking") --
+    confirmed unreliable in production (no new entries since 2026-05-31
+    despite many subsequent agent completions). This hook fires at the exact
+    moment write_result was confirmed called with a valid chat_id, which is
+    the same reliable trigger point the manual instructions described, but no
+    longer dependent on the dispatcher's own later processing of the
+    subagent_result message.
+
+    Idempotent by construction: inflight-work.jsonl is an append-only log and
+    consumers (on-fresh-start.py, dispatcher-state-stop.py) treat a task_id as
+    "done" if *any* entry has status == "done", so appending a duplicate
+    "done" line for the same task_id (e.g. hook re-fire) is harmless.
+
+    Never raises -- mirrors _mark_session_completed's best-effort failure
+    policy so a bookkeeping problem never blocks the subagent from exiting.
+    """
+    try:
+        entry = {
+            "task_id": task_id,
+            "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "status": "done",
+        }
+        INFLIGHT_WORK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(INFLIGHT_WORK_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001
+        pass  # Best-effort; never block exit
 
 
 def _mark_session_completed(id_or_task_id: str) -> None:
@@ -581,6 +631,15 @@ def main():
                 _mark_session_completed(tid)
             if session_id:
                 _mark_session_completed(session_id)
+
+            # Append inflight-work.jsonl "done" entries (issue: automate-
+            # inflight-work-writes). Only task_ids from write_result inputs
+            # are used here -- not session_id -- because inflight-work.jsonl
+            # "running" entries are keyed by the dispatcher's task_id (see
+            # auto-register-agent.py's write_inflight_running_entry), the same
+            # value a well-behaved subagent passes back to write_result.
+            for tid in write_result_task_ids:
+                _append_inflight_done_entry(tid)
 
             # Set notified_at on all rows so the reconciler never sees them as
             # unnotified and enqueues duplicate subagent_notification messages.
