@@ -148,6 +148,42 @@ DISPATCHER_SESSION_START_FILE = Path(
     )
 )
 
+# Dispatcher heartbeat sentinel (issue #2150).
+#
+# Normally written by hooks/thinking-heartbeat.py on every PostToolUse event.
+# health-check-v3.sh's check_dispatcher_heartbeat() treats this file as stale
+# (RED) once DISPATCHER_HEARTBEAT_STALE_SECONDS have elapsed since its mtime
+# content, subject to a time-bounded WFM-active suppression window capped at
+# (SESSION_AGE_LIMIT_SECONDS - WFM_SUPPRESSION_MARGIN_SECONDS) = 6900s/115min.
+#
+# Bug: neither restart path reset this file when spawning a replacement
+# dispatcher session:
+#   1. The graceful SIGTERM path (check_session_age(), fires at
+#      SESSION_AGE_LIMIT_SECONDS = 7200s/2h)
+#   2. The hard restart path (do_restart(), fires on RED heartbeat staleness)
+# Because the RED cap (115min) sits only 5 minutes inside the session-age
+# limit (2h), a new session could inherit an already near-stale heartbeat
+# file from its predecessor and re-breach the cap within the very next 4-min
+# health-check cycle -- causing a second, spurious restart shortly after a
+# legitimate one. Most visible on quiet/idle days with few tool calls to
+# naturally refresh the heartbeat early in the new session's life.
+#
+# Fix: reset this file to "now" at the same point _write_dispatcher_session_start()
+# already runs -- i.e. on every genuine new dispatcher process start (PID
+# startup-flag signal), which is the single choke point both restart paths funnel
+# through via claude-persistent.sh's launcher. This covers both restart paths
+# without duplicating logic in the bash health-check script.
+#
+# Same path/format health-check-v3.sh and thinking-heartbeat.py already use
+# (LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE / logs/dispatcher-heartbeat, single
+# Unix epoch integer) -- no health-check-v3.sh change required.
+DISPATCHER_HEARTBEAT_FILE = Path(
+    os.environ.get(
+        "LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE",
+        str(_LOBSTER_WORKSPACE / "logs" / "dispatcher-heartbeat"),
+    )
+)
+
 
 def _parse_admin_chat_id(config_env_path: Path) -> str | None:
     """Parse LOBSTER_ADMIN_CHAT_ID from a config.env file.
@@ -271,6 +307,37 @@ def _write_dispatcher_session_start() -> None:
     try:
         now_epoch = int(time.time())
         path = DISPATCHER_SESSION_START_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(str(now_epoch) + "\n")
+        tmp_path.replace(path)  # atomic on Linux
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _reset_dispatcher_heartbeat() -> None:
+    """Write the current Unix epoch to DISPATCHER_HEARTBEAT_FILE.
+
+    Called once per genuine new dispatcher process start (issue #2150), at the
+    same point _write_dispatcher_session_start() runs. Fixes a startup race:
+    a new dispatcher session previously inherited its predecessor's heartbeat
+    file, which could already be near the staleness threshold, letting it
+    breach the RED cap within the very next health-check cycle and trigger a
+    spurious second restart. Resetting the heartbeat here -- before the new
+    session's first health-check cycle can evaluate it -- gives every new
+    session a full, fresh staleness window regardless of how stale its
+    predecessor's heartbeat had become.
+
+    Same file, same format (single Unix epoch integer) that
+    hooks/thinking-heartbeat.py writes on every PostToolUse event, so
+    health-check-v3.sh's check_dispatcher_heartbeat() requires no changes.
+
+    Uses an atomic rename so the reader never sees a partial write.
+    Silent on any error — must never crash the hook.
+    """
+    try:
+        now_epoch = int(time.time())
+        path = DISPATCHER_HEARTBEAT_FILE
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(".tmp")
         tmp_path.write_text(str(now_epoch) + "\n")
@@ -450,6 +517,18 @@ def main() -> None:
         _write_dispatcher_session_start()
         print(
             f"[{HOOK_NAME}] wrote dispatcher session start timestamp",
+            file=sys.stderr,
+        )
+        # Reset the dispatcher heartbeat sentinel for this new process (issue #2150).
+        # Neither restart path (graceful SIGTERM at SESSION_AGE_LIMIT_SECONDS, nor
+        # do_restart() on RED heartbeat staleness) cleared the heartbeat file when
+        # spawning the replacement session, letting a new session inherit an
+        # already near-stale heartbeat and re-breach the RED cap on the very next
+        # health-check cycle. Reset here, at the one choke point both restart
+        # paths funnel through (a genuine new `claude` process start).
+        _reset_dispatcher_heartbeat()
+        print(
+            f"[{HOOK_NAME}] reset dispatcher heartbeat",
             file=sys.stderr,
         )
     elif uuid_dispatcher:

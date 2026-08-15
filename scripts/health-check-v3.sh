@@ -40,11 +40,17 @@
 #   WFM-active suppression: while the dispatcher blocks in wait_for_messages on
 #   an idle inbox, the WFM daemon thread refreshes DISPATCHER_WFM_ACTIVE_FILE
 #   every 60s. A fresh WFM-active file (< 180s) suppresses the heartbeat-stale RED.
-#   CRITICAL (issue #2074): suppression is time-bounded at WFM_SUPPRESSION_MAX_SECONDS
-#   (2700s). A frozen dispatcher's daemon thread keeps refreshing WFM-active
-#   independently of the asyncio loop — unbounded suppression recreates the
-#   false-negative that caused the May 2026 2-day outage. After 2700s of heartbeat
-#   staleness, RED fires regardless of WFM-active freshness.
+#   CRITICAL (issue #2074): suppression is time-bounded at WFM_SUPPRESSION_MAX_SECONDS.
+#   A frozen dispatcher's daemon thread keeps refreshing WFM-active independently
+#   of the asyncio loop — unbounded suppression recreates the false-negative that
+#   caused the May 2026 2-day outage. Once the heartbeat has been stale that long,
+#   RED fires regardless of WFM-active freshness.
+#
+#   WFM_SUPPRESSION_MAX_SECONDS is DERIVED from SESSION_AGE_LIMIT_SECONDS (see
+#   below), not a fixed literal — see the derivation comment near that constant
+#   for why a fixed 2700s cap caused an hourly false-positive restart loop on
+#   2026-08-03 once wait_for_messages was allowed to legitimately idle for hours
+#   (issue #2074, second incident).
 #
 # Boot grace period:
 #   After any restart (health-check-initiated or manual), the new Claude session
@@ -109,17 +115,40 @@ HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"   # legacy WFM-touch signa
 DISPATCHER_HEARTBEAT_FILE="${LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-heartbeat}"
 DISPATCHER_HEARTBEAT_STALE_SECONDS=1200   # 20 min — covers compaction (~5m) + catchup (~12m) + margin
 
-# Session age limit (issue #2059): we proactively SIGTERM the dispatcher at
-# SESSION_AGE_LIMIT_SECONDS (7200s) as an operational precaution against
-# sessions dying uncleanly (no Stop hook, no tombstone, no compaction alert)
-# around that age. NOTE: the original justification for 7440s as a
-# CC-enforced hard limit rested on only 2 observed data points and was never
-# confirmed against Anthropic documentation — see issue #2157. Treat this as
-# a precautionary restart, not evidence of a confirmed CC session limit.
+# Session age limit: proactive SIGTERM restart mechanism (issue #2059).
+#
+# DISABLED BY DEFAULT (issue #2196 / #2157). This mechanism was originally
+# justified by a claimed "CC enforces a hard 7440s session lifetime" — but
+# issue #2157 found that claim rested on only 2 data points, was never
+# confirmed against Anthropic docs, and had a more likely alternative
+# explanation (an unrelated heartbeat-staleness bug, since fixed by #2074).
+# The live dispatcher session has since run 90+ hours with zero problems,
+# directly contradicting the original 7440s premise. There is no remaining
+# evidence that Claude Code kills sessions on a wall-clock timer.
+#
+# The mechanism itself still works and is harmless once opted into: when
+# enabled, it sends a graceful SIGTERM to the dispatcher PID at
+# SESSION_AGE_LIMIT_SECONDS so the Stop hook fires cleanly (vs. an
+# uncontrolled kill from some other layer, e.g. a systemd bounce). Keep it
+# available as an opt-in operational precaution — e.g. an operator who wants
+# a periodic recycle for unrelated reasons (log rotation, memory hygiene) —
+# but do not force it on new/updated installs by default.
+#
 # Written by inject-bootup-context.py as a plain Unix epoch integer.
-# Set LOBSTER_SESSION_AGE_LIMIT_SECONDS=0 in config.env to disable this check.
-SESSION_AGE_LIMIT_SECONDS="${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-7200}"
+# Set LOBSTER_SESSION_AGE_LIMIT_SECONDS=<seconds> in config.env to opt in.
+SESSION_AGE_LIMIT_SECONDS="${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-0}"
 DISPATCHER_SESSION_START_FILE="${LOBSTER_DISPATCHER_SESSION_START_FILE_OVERRIDE:-$WORKSPACE_DIR/data/dispatcher-session-start.ts}"
+
+# Orphaned stdio MCP process reaper (issue #2119). Backstop for stdio MCP
+# children (obsidian-mcp specifically, pattern is generic) that survive a
+# session-age restart despite check_session_age()'s kill_dispatcher_children
+# call -- e.g. a restart that took the crash path instead of the graceful
+# SIGTERM path, or any other route that reparents an MCP child to PID 1
+# without signalling it. Threshold is one restart cycle (SESSION_AGE_LIMIT_SECONDS,
+# 7200s = 2h) plus a margin so we never race a process that is still
+# mid-reparenting from a restart that is in progress right now.
+ORPHAN_MCP_REAP_AGE_SECONDS="${LOBSTER_ORPHAN_MCP_REAP_AGE_SECONDS:-8100}"   # 2h15m
+ORPHAN_MCP_REAP_PATTERN="${LOBSTER_ORPHAN_MCP_REAP_PATTERN:-obsidian-mcp}"
 
 # WFM-active signal (issue #1713 / #949): inbox_server.py writes this file with
 # a Unix epoch timestamp when wait_for_messages begins blocking and refreshes it
@@ -135,16 +164,57 @@ WFM_ACTIVE_STALE_SECONDS=180   # 3x WAIT_HEARTBEAT_INTERVAL (60s) — absorbs on
 # main asyncio event loop — so WFM-active freshness alone is NOT sufficient proof
 # of liveness. The suppression is therefore time-bounded:
 #
-#   If the dispatcher heartbeat has been stale for > WFM_SUPPRESSION_MAX_SECONDS,
+#   If the dispatcher heartbeat has been stale for >= WFM_SUPPRESSION_MAX_SECONDS,
 #   the WFM-active freshness check is ignored and RED fires regardless.
 #
-# Rationale: the heartbeat goes stale when the dispatcher enters WFM (the last
-# PostToolUse fires just before wait_for_messages is called). So heartbeat stale
-# age ≈ time spent in WFM. After WFM_SUPPRESSION_MAX_SECONDS the system has been
-# idle long enough that (a) the watchdog has already fired if WFM was frozen, and
-# (b) the session age limit (SESSION_AGE_LIMIT_SECONDS = 7200s) will soon force a
-# graceful restart. This constant must be less than SESSION_AGE_LIMIT_SECONDS.
-WFM_SUPPRESSION_MAX_SECONDS=2700   # 45 min: stop suppressing beyond this heartbeat-stale age
+# --- Why this is derived, not a fixed literal (issue #2074, second incident) ---
+# The original fix (PR #2090) hardcoded WFM_SUPPRESSION_MAX_SECONDS=2700 (45 min).
+# That assumed a legitimate wait_for_messages() idle window would never get
+# anywhere near 45 minutes, because Claude Code's own client-side MCP tool-idle
+# watchdog used to abort wait_for_messages well under that window. PR #2144
+# (2026-08-02) removed that client-side watchdog *by design*, so wait_for_messages
+# can now legitimately block for hours on a quiet inbox. That silently invalidated
+# the 2700s assumption: any normal quiet period longer than 45 minutes started
+# un-suppressing this check and firing a false RED, restarting a perfectly healthy
+# dispatcher roughly hourly (observed 2026-08-03).
+#
+# check_session_age() already provides an unconditional, activity-independent
+# backstop: every dispatcher session is recycled at SESSION_AGE_LIMIT_SECONDS
+# regardless of heartbeat or WFM state (it sends SIGTERM directly to the
+# dispatcher PID on a wall-clock timer, not a heartbeat-derived one). So this cap
+# no longer needs to be a fast, independent frozen-detector — it only needs to
+# catch the case where that backstop itself failed to fire (e.g. a missing or
+# corrupt dispatcher.pid file). Deriving it as (SESSION_AGE_LIMIT_SECONDS minus a
+# safety margin) keeps it just inside that backstop, so it can never again be
+# tighter than the session lifetime a legitimate idle wait is allowed to reach.
+# See compute_wfm_suppression_max_seconds() below.
+WFM_SUPPRESSION_MARGIN_SECONDS=300      # 5 min: fire slightly before the session-age backstop would anyway
+WFM_SUPPRESSION_FALLBACK_SECONDS=21600  # 6h: used when SESSION_AGE_LIMIT_SECONDS=0 (the default as of issue #2196 — session-age check disabled)
+
+# Pure function: derive the WFM-active suppression cap from the session-age
+# limit. No side effects, no globals read — everything comes in as an argument,
+# so this is trivially unit-testable in isolation (see
+# tests/test-health-check-dispatcher-heartbeat.sh).
+#   $1 = session_age_limit  (SESSION_AGE_LIMIT_SECONDS, post config.env override; 0 = disabled)
+#   $2 = margin             (WFM_SUPPRESSION_MARGIN_SECONDS)
+#   $3 = fallback           (WFM_SUPPRESSION_FALLBACK_SECONDS, used when $1 <= 0)
+# Prints the derived value on stdout.
+compute_wfm_suppression_max_seconds() {
+    local session_age_limit="$1"
+    local margin="$2"
+    local fallback="$3"
+
+    if [[ "$session_age_limit" -le 0 ]]; then
+        echo "$fallback"
+        return
+    fi
+
+    local derived=$(( session_age_limit - margin ))
+    if [[ $derived -lt 1 ]]; then
+        derived=1
+    fi
+    echo "$derived"
+}
 
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
@@ -195,7 +265,9 @@ fi
 LOBSTER_ENV="${LOBSTER_ENV:-production}"
 
 # Read LOBSTER_SESSION_AGE_LIMIT_SECONDS from config.env (if not already in environment).
-# Set to 0 in config.env to disable the proactive session-age restart check.
+# Default is 0 (disabled — see the comment near the initial assignment above,
+# issue #2196 / #2157). Set a positive integer in config.env to opt in to the
+# proactive session-age restart.
 if [[ -z "${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-}" && -f "$CONFIG_ENV" ]]; then
     _cfg_sal=$(grep '^LOBSTER_SESSION_AGE_LIMIT_SECONDS=' "$CONFIG_ENV" 2>/dev/null | cut -d'=' -f2- | tr -d '[:space:]"' || true)
     if [[ -n "$_cfg_sal" ]]; then
@@ -205,7 +277,21 @@ if [[ -z "${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-}" && -f "$CONFIG_ENV" ]]; then
 fi
 # Re-apply SESSION_AGE_LIMIT_SECONDS now that config.env may have updated the env var.
 # The initial assignment at top of file used the env var before config.env was read.
-SESSION_AGE_LIMIT_SECONDS="${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-7200}"
+SESSION_AGE_LIMIT_SECONDS="${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-0}"
+
+# Read LOBSTER_WFM_SUPPRESSION_MAX_SECONDS from config.env (if not already in
+# environment) for operators who want an explicit override instead of the
+# SESSION_AGE_LIMIT_SECONDS-derived default (see compute_wfm_suppression_max_seconds
+# above, and the comment near WFM_SUPPRESSION_MARGIN_SECONDS for why this is
+# derived rather than a fixed literal).
+if [[ -z "${LOBSTER_WFM_SUPPRESSION_MAX_SECONDS:-}" && -f "$CONFIG_ENV" ]]; then
+    _cfg_wfm_cap=$(grep '^LOBSTER_WFM_SUPPRESSION_MAX_SECONDS=' "$CONFIG_ENV" 2>/dev/null | cut -d'=' -f2- | tr -d '[:space:]"' || true)
+    if [[ -n "$_cfg_wfm_cap" ]]; then
+        LOBSTER_WFM_SUPPRESSION_MAX_SECONDS="$_cfg_wfm_cap"
+    fi
+    unset _cfg_wfm_cap
+fi
+WFM_SUPPRESSION_MAX_SECONDS="${LOBSTER_WFM_SUPPRESSION_MAX_SECONDS:-$(compute_wfm_suppression_max_seconds "$SESSION_AGE_LIMIT_SECONDS" "$WFM_SUPPRESSION_MARGIN_SECONDS" "$WFM_SUPPRESSION_FALLBACK_SECONDS")}"
 
 # Ensure log directory exists
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -1329,42 +1415,107 @@ clear_stale_inbox_markers() {
 
 # Returns the count of currently-running subagent sessions from agent_sessions.db.
 # Returns 0 if the database doesn't exist or cannot be read (fail-open: allow restart).
+#
+# Excludes the dispatcher's own row (issue #2176, found as a byproduct of the
+# ghost-kill regression investigation — pre-existing, NOT caused by PR #2152,
+# and predates DISPATCHER_EXCLUSION_SQL/this bug class's other fixes by ~1700+
+# commits). The dispatcher's own row is always status='running' for its entire
+# lifetime, so before this fix the count here structurally always included at
+# least 1 for the dispatcher itself — meaning the SUBAGENT GUARD in do_restart()
+# (`if [[ "$active_subagents" -gt 0 ]]`) would defer every RED-state restart
+# indefinitely whenever the dispatcher's row was present, regardless of whether
+# any real subagent was actually running. DISPATCHER_EXCLUSION_SQL is the shared
+# single source of truth (scripts/lib/agent_sessions.sh; see #781 / PR #2099 /
+# PR #2103 / issue #2176 for the history of this filter being reinvented
+# independently at each call site before consolidation) — must match
+# DISPATCHER_EXCLUSION_SQL in src/utils/agent_types.py.
 count_active_subagents() {
     local db_file="${MESSAGES_DIR}/config/agent_sessions.db"
     if [[ ! -f "$db_file" ]]; then
         echo "0"
         return
     fi
-    uv run python3 -c "
-import sqlite3, sys
-try:
-    conn = sqlite3.connect('$db_file')
-    row = conn.execute(\"SELECT COUNT(*) FROM agent_sessions WHERE status='running'\").fetchone()
-    print(row[0] if row else 0)
-except Exception as e:
-    print(0)
-" 2>/dev/null || echo "0"
+    source "${LOBSTER_INSTALL_DIR:-$HOME/lobster}/scripts/lib/agent_sessions.sh"
+    sqlite3 "$db_file" \
+        "SELECT COUNT(*) FROM agent_sessions WHERE status='running' AND ${DISPATCHER_EXCLUSION_SQL}" \
+        2>/dev/null || echo "0"
 }
 
 #===============================================================================
-# Session Age Check — proactive restart at SESSION_AGE_LIMIT_SECONDS
-# (issue #2059)
+# get_descendant_pids — recursively enumerate ALL descendants of a PID
+# (issue #2221)
 #
-# We send SIGTERM to the dispatcher process at SESSION_AGE_LIMIT_SECONDS
-# (7200s) as an operational precaution, so the Stop hook fires cleanly instead
-# of risking an uncleanly-terminated session (no tombstone, no compact-
-# catchup) around that age. NOTE: issue #2059's original justification —
-# that Claude Code enforces a hard 7440-second session lifetime — was based
-# on only 2 observed data points and was never confirmed against Anthropic
-# documentation of any such limit. See issue #2157 for the reassessment.
-# This restart is kept as a precaution; its value does not depend on the
-# original "hard limit" claim being true.
+# `pgrep -P $pid` only returns DIRECT children — one hop. Stdio MCP servers
+# spawned via `npx`/`npm exec` fork through an intermediate `sh -c` wrapper
+# before reaching the real worker process, so the process that actually needs
+# to be killed (e.g. the obsidian-mcp `node` process) can be two or three hops
+# below the dispatcher's direct child, not one. A single `pgrep -P` call never
+# reaches it.
 #
-# Unlike do_restart() (which uses systemctl), this sends SIGTERM directly to the
-# claude process so the Stop hook fires. The claude-persistent.sh wrapper detects
-# the exit and restarts Claude automatically.
+# This does a breadth-first walk of the full descendant tree — pgrep -P on
+# each newly-discovered PID, repeated until no new descendants are found — so
+# every hop is captured regardless of depth, instead of assuming a fixed hop
+# count.
+#
+# $1 = root PID to walk descendants of (e.g. the dispatcher PID)
+# Prints one descendant PID per line to stdout (may print nothing if the PID
+# has no children). Never includes the root PID itself.
+#===============================================================================
+get_descendant_pids() {
+    local root_pid="$1"
+    local queue=("$root_pid")
+    local descendants=()
+    local visited=" "
+
+    while [[ ${#queue[@]} -gt 0 ]]; do
+        local current="${queue[0]}"
+        queue=("${queue[@]:1}")
+
+        # Defensive guard against a repeated PID in the walk (shouldn't happen
+        # with real process trees, but keeps this safe against pathological
+        # /proc states rather than looping forever).
+        if [[ "$visited" == *" $current "* ]]; then
+            continue
+        fi
+        visited="$visited$current "
+
+        local children
+        children=$(pgrep -P "$current" 2>/dev/null || true)
+        local child
+        for child in $children; do
+            descendants+=("$child")
+            queue+=("$child")
+        done
+    done
+
+    if [[ ${#descendants[@]} -gt 0 ]]; then
+        printf '%s\n' "${descendants[@]}"
+    fi
+}
+
+#===============================================================================
+# Session Age Check — opt-in proactive restart on a wall-clock timer
+# (issue #2059; disabled by default as of issue #2196 — see #2157)
+#
+# Originally justified by a claimed hard 7440-second CC session lifetime.
+# That claim is debunked: issue #2157 found the original evidence (issue
+# #2059) rested on only 2 data points, was never confirmed against Anthropic
+# docs, and had a more likely alternative explanation (an unrelated
+# heartbeat-staleness bug, fixed by #2074). The live dispatcher session has
+# since run 90+ hours with zero problems, directly contradicting the
+# original premise. There is no remaining evidence CC kills sessions on a
+# wall-clock timer, so this is DISABLED BY DEFAULT (SESSION_AGE_LIMIT_SECONDS=0).
+#
+# When enabled (LOBSTER_SESSION_AGE_LIMIT_SECONDS set to a positive value in
+# config.env), this sends SIGTERM to the dispatcher process once the session
+# reaches SESSION_AGE_LIMIT_SECONDS, so the Stop hook fires cleanly instead
+# of an uncontrolled kill from some other layer. Unlike do_restart() (which
+# uses systemctl), this sends SIGTERM directly to the claude process so the
+# Stop hook fires. The claude-persistent.sh wrapper detects the exit and
+# restarts Claude automatically.
 #
 # Suppressed when:
+#   - SESSION_AGE_LIMIT_SECONDS=0 (the default — check is disabled entirely)
 #   - DISPATCHER_SESSION_START_FILE is missing (old install, no session tracking)
 #   - Maintenance mode is active (flag is present — handled in main before this call)
 #   - Boot grace period is active (avoid killing a session that just started)
@@ -1429,6 +1580,30 @@ check_session_age() {
         return 0
     fi
 
+    # Snapshot the dispatcher's FULL descendant tree BEFORE sending SIGTERM
+    # (issue #2119, hardened for #2221). This must happen first: once the
+    # dispatcher (`claude`) receives SIGTERM and exits, its children (stdio
+    # MCP servers like `obsidian-mcp`) are reparented away from
+    # $dispatcher_pid immediately — querying the process tree AFTER the
+    # SIGTERM is a race that can find zero children even though they existed
+    # a moment earlier, because the parent is already gone by the time the
+    # query runs. Capturing the list first and signalling those specific PIDs
+    # afterward removes the race entirely.
+    #
+    # #2221: a single `pgrep -P $dispatcher_pid` only reaches ONE hop below
+    # the dispatcher. The real obsidian-mcp process tree is three hops deep
+    # (verified live via `ps -o pid,ppid,pgid,sid,comm`):
+    #   claude (dispatcher) -> npm exec obsidian-mcp -> sh -c obsidian-mcp -> node .../obsidian-mcp
+    # `npx`/`npm exec` forks (does not exec) into an intermediate `sh -c`,
+    # which forks (does not exec) into the real `node` worker -- the process
+    # that actually hangs. A one-hop `pgrep -P` only ever found the `npm exec`
+    # wrapper; its `sh`/`node` descendants were left running and reparented to
+    # PID 1 on every session-age restart, so this got caught by the cron
+    # backstop reaper instead of prevented at restart time. get_descendant_pids()
+    # walks the whole tree (all hops) so every descendant is captured.
+    local mcp_child_pids
+    mcp_child_pids=$(get_descendant_pids "$dispatcher_pid")
+
     # Notify BEFORE sending SIGTERM (issue #2075) so the message reaches the user
     # even if the session exits immediately once SIGTERM is delivered — if the
     # alert were sent after kill -TERM, a fast process death could drop it
@@ -1449,6 +1624,19 @@ check_session_age() {
     # restarts Claude. This is a graceful exit, not a crash.
     if kill -TERM "$dispatcher_pid" 2>/dev/null; then
         log_warn "Session age: SIGTERM sent to dispatcher PID $dispatcher_pid"
+
+        # Also signal every descendant process we snapshotted above -- stdio
+        # MCP servers like `obsidian-mcp` (issue #2119), reached at every hop
+        # of the tree, not just the dispatcher's direct child (issue #2221).
+        # SIGTERM to $dispatcher_pid only reaches the `claude` process itself;
+        # it does NOT cascade to stdio MCP descendants it spawned, which are
+        # simply orphaned (reparented to PID 1) rather than killed.
+        # obsidian-mcp specifically has no application-level timeout and can
+        # be mid-hang at the moment of this restart, so leaving it running
+        # produces exactly the orphan leak this issue reports: one stray
+        # process per session-age restart, accumulating indefinitely.
+        kill_dispatcher_children $mcp_child_pids
+
         # Delete the start timestamp so a subsequent health check run (within the
         # next 4 minutes) does not send a second SIGTERM before the restart completes.
         rm -f "$DISPATCHER_SESSION_START_FILE" 2>/dev/null || true
@@ -1456,6 +1644,160 @@ check_session_age() {
     else
         log_warn "Session age: SIGTERM to PID $dispatcher_pid failed (process may have exited already)"
         return 0
+    fi
+}
+
+#===============================================================================
+# kill_dispatcher_children — signal descendant processes of the dispatcher
+# (issue #2119, hardened for #2221)
+#
+# Why not signal the dispatcher's whole process group instead (kill -TERM
+# -$pgid)? That was the initial fix proposal, but it does not hold up against
+# the live process tree. Verified on the production host, both at #2119 fix
+# time and re-verified for #2221 (still holds -- same PGID sharing today):
+#
+#   $ ps -o pid,ppid,pgid,sid,comm -p "$dispatcher_pid"
+#       PID    PPID    PGID     SID COMMAND
+#   4183042 2901787 2901787 2901787 claude
+#
+# The dispatcher's PGID (2901787) is NOT its own PID (4183042) -- it shares
+# its process group with claude-persistent.sh (PID 2901787), the supervisor
+# script that detects the dispatcher's exit and relaunches it, which in turn
+# runs under the tmux session leader. `kill -TERM -$dispatcher_pid` would
+# target a process group that doesn't exist (no-op); using the *real* PGID
+# instead would SIGTERM the supervisor and the tmux pane along with it,
+# breaking the auto-restart mechanism this entire flow depends on. This also
+# rules out PGID as the fix for #2221: every obsidian-mcp descendant (the
+# `npm exec` wrapper, the `sh -c` it forks, and the `node` worker under that)
+# shares that same PGID with the supervisor, so group-signalling still is not
+# a safe way to isolate "the dispatcher's descendants" from "the supervisor
+# that must survive the restart."
+#
+# Enumerating the FULL descendant tree of $dispatcher_pid (get_descendant_pids,
+# a recursive walk -- see #2221) is the safe alternative: it reaches every MCP
+# descendant the dispatcher spawned at every hop (obsidian-mcp's `npm exec` ->
+# `sh -c` -> `node` chain, inbox_server.py, etc.) without touching anything
+# above the dispatcher in the process tree. A one-hop `pgrep -P` (the #2119
+# implementation) only found the immediate child (`npm exec`); it did not
+# reach the `sh`/`node` descendants underneath, which is exactly the gap
+# #2221 closes. A fresh set of children is spawned by the next Claude launch
+# regardless, so killing all current descendants here is safe -- none of them
+# have a reason to outlive this session.
+#
+# Takes the descendant PIDs as arguments (already-enumerated by the caller)
+# rather than a parent PID to enumerate itself. This matters: the caller must
+# snapshot the descendants BEFORE sending SIGTERM to the dispatcher, because
+# once the dispatcher exits its children are reparented away immediately —
+# enumerating *after* the SIGTERM is a race that can observe zero descendants
+# even though they existed a moment earlier.
+#===============================================================================
+kill_dispatcher_children() {
+    local child_pids="$*"
+
+    if [[ -z "${child_pids// /}" ]]; then
+        log_info "Session age: no descendant processes to signal"
+        return 0
+    fi
+
+    log_warn "Session age: signalling dispatcher descendant process(es): $(echo "$child_pids" | tr '\n' ' ')"
+
+    local sigterm_pids=()
+    local cpid
+    for cpid in $child_pids; do
+        if kill -TERM "$cpid" 2>/dev/null; then
+            sigterm_pids+=("$cpid")
+        fi
+    done
+
+    if [[ ${#sigterm_pids[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    # Brief grace period, then SIGKILL any child that ignored SIGTERM (e.g. a
+    # stdio MCP server hung inside a blocking call with no signal handling
+    # path that actually exits). Only SIGKILL PIDs we sent SIGTERM to, to
+    # avoid hitting an unrelated process that reused the PID during the wait.
+    sleep 2
+    for cpid in "${sigterm_pids[@]}"; do
+        if kill -0 "$cpid" 2>/dev/null; then
+            log_warn "Session age: child PID $cpid still alive after SIGTERM — sending SIGKILL"
+            kill -KILL "$cpid" 2>/dev/null || true
+        fi
+    done
+}
+
+#===============================================================================
+# reap_orphaned_mcp_processes — cron backstop for orphaned stdio MCP servers
+# (issue #2119)
+#
+# check_session_age()'s kill_dispatcher_children() is the primary fix: it
+# signals stdio MCP children (obsidian-mcp) at the moment of a session-age
+# restart, before they can be orphaned. This function is the backstop for
+# every path that primary fix does not cover -- a dispatcher crash (OOM,
+# hard kill, CC's 7440s hard limit firing before the proactive restart),
+# a restart on an older/rolled-back build without kill_dispatcher_children,
+# or any other route that reparents an MCP child to PID 1 without signalling
+# it first.
+#
+# Runs every health-check-v3.sh cycle (cron, every 4 minutes -- see
+# `# LOBSTER-HEALTH` in crontab), independent of whether a restart is
+# happening right now. Only targets processes that are BOTH:
+#   1. Reparented to init (PPID=1) -- i.e. actually orphaned, not a live
+#      MCP child of the current dispatcher session
+#   2. Older than ORPHAN_MCP_REAP_AGE_SECONDS (default 8100s = 2h15m, i.e.
+#      one full session-age restart cycle plus a 15-minute margin) -- this
+#      avoids racing a process that is still mid-reparenting from a restart
+#      that is in progress right this moment
+#===============================================================================
+reap_orphaned_mcp_processes() {
+    local pattern="$ORPHAN_MCP_REAP_PATTERN"
+    local max_age="$ORPHAN_MCP_REAP_AGE_SECONDS"
+
+    local candidate_pids
+    candidate_pids=$(pgrep -f "$pattern" 2>/dev/null || true)
+
+    if [[ -z "$candidate_pids" ]]; then
+        return 0
+    fi
+
+    local reaped=0
+    local pid
+    for pid in $candidate_pids; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            continue
+        fi
+
+        local ppid
+        ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [[ "$ppid" != "1" ]]; then
+            # Still has a live parent -- a legitimate MCP child of a current
+            # session, not an orphan. Leave it alone.
+            continue
+        fi
+
+        local etimes
+        etimes=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [[ -z "$etimes" || ! "$etimes" =~ ^[0-9]+$ ]]; then
+            continue
+        fi
+        if [[ "$etimes" -lt "$max_age" ]]; then
+            log_info "Orphan reaper: PID $pid matches '$pattern', PPID=1, but only ${etimes}s old (< ${max_age}s) — leaving it for now"
+            continue
+        fi
+
+        log_warn "Orphan reaper: killing orphaned MCP process PID $pid (matches '$pattern', PPID=1, age ${etimes}s >= ${max_age}s)"
+        if kill -TERM "$pid" 2>/dev/null; then
+            reaped=$((reaped + 1))
+            sleep 1
+            if kill -0 "$pid" 2>/dev/null; then
+                log_warn "Orphan reaper: PID $pid still alive after SIGTERM — sending SIGKILL"
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        fi
+    done
+
+    if [[ $reaped -gt 0 ]]; then
+        log_warn "Orphan reaper: reaped $reaped orphaned MCP process(es) matching '$pattern'"
     fi
 }
 
@@ -1835,6 +2177,13 @@ main() {
         fi
     fi
 
+    # --- Orphaned stdio MCP process reaper (issue #2119) ---
+    # Cheap (pgrep + ps on a handful of PIDs at most) and safe to run every
+    # cycle regardless of lifecycle state or boot grace -- it only ever acts
+    # on processes that are already reparented to PID 1 and past the age
+    # threshold, never on anything belonging to the current session.
+    reap_orphaned_mcp_processes
+
     # --- Always check systemd services (includes router/bot) ---
     if ! check_services; then
         level="RED"
@@ -2176,4 +2525,12 @@ if [[ "${1:-}" == "--clear-black" ]]; then
     exit 0
 fi
 
-main "$@"
+# Only run main when executed directly (cron, manual invocation). When this
+# script is sourced (e.g. `source health-check-v3.sh` from a test harness, to
+# exercise individual functions like check_session_age/kill_dispatcher_children/
+# reap_orphaned_mcp_processes in isolation), skip the auto-run so the caller
+# controls exactly what runs. No behavior change for the normal cron path --
+# BASH_SOURCE[0] == $0 is true whenever the script is invoked directly.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

@@ -60,6 +60,13 @@ assert_exit() {
 LOG_FILE="$TEST_LOG_DIR/health-check.log"
 DISPATCHER_HEARTBEAT_STALE_SECONDS=1200
 WFM_ACTIVE_STALE_SECONDS=180
+# check_dispatcher_heartbeat() also reads WFM_SUPPRESSION_MAX_SECONDS (issue
+# #2074) to time-bound WFM-active suppression. This suite predates that cap and
+# is testing the WFM-active freshness gate specifically (not the time cap, which
+# has its own dedicated suite in test-health-check-dispatcher-heartbeat.sh), so
+# set it far beyond any heartbeat-stale age used below (max 601s) to keep it a
+# no-op here. Pre-existing `set -u` unbound-variable failure fixed in passing.
+WFM_SUPPRESSION_MAX_SECONDS=999999
 
 log()       { echo "[$1] $2" >> "$LOG_FILE" 2>/dev/null; }
 log_info()  { log INFO "$1"; }

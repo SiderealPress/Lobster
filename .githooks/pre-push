@@ -25,12 +25,20 @@
 # binaries, breaks test fixtures that intentionally contain fake values, and
 # loops on its own output.
 #
-# Exclusions (never scanned):
+# Exclusions (never scanned by ANY check):
 #   - Test directories: tests/, test/, spec/, or any path with /test
-#   - Documentation: .md, .mdx, .rst, .txt, .adoc (examples/placeholders by design)
 #   - Binary files: detected by extension
 #   - The hook files themselves (.githooks/*)
 #   - Files listed in .githooks/security-allowlist.txt
+#
+# Documentation files (.md, .mdx, .rst, .txt, .adoc) get a NARROWER exemption:
+# they are skipped for PII / instance-identifier / personal-name checks
+# (examples and placeholder values are legitimate documentation content), but
+# they ARE scanned for high-confidence secret/token patterns (API keys,
+# private keys, Telegram bot tokens, etc). A real secret pasted into a doc
+# file is still a leak — see #2160, where a real Telegram bot token sat
+# undetected in docs/DOCKER-TESTING.md for months because the old exemption
+# covered secrets too.
 #
 # Inline suppressions (in source files):
 #   - '# nosec' or '# noqa' — suppress security/PII match on that line
@@ -120,8 +128,10 @@ is_allowlisted() {
     return 1
 }
 
-# Returns 0 (skip) if the file should not be scanned.
-should_skip_file() {
+# Returns 0 (skip) if the file should never be scanned by ANY check —
+# the hook's own source, test fixtures, and binary/generated files. These
+# exclusions apply uniformly regardless of check category (PII vs secrets).
+should_skip_file_common() {
     local filepath="$1"
     local ext="${filepath##*.}"
 
@@ -138,11 +148,6 @@ should_skip_file() {
         return 0
     fi
 
-    # Skip documentation files — example/placeholder values by design
-    case "$filepath" in
-        *.md|*.mdx|*.rst|*.txt|*.adoc) return 0 ;;
-    esac
-
     # Skip known binary/generated/lock file extensions
     case "$ext" in
         png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|mp3|mp4|zip|tar|gz|bz2|xz|pdf) return 0 ;;
@@ -150,6 +155,38 @@ should_skip_file() {
         lock) return 0 ;;
     esac
 
+    return 1
+}
+
+# Returns 0 if filepath is a documentation file (*.md, *.mdx, *.rst, *.txt,
+# *.adoc). Doc files are exempt from PII/instance/name checks (examples and
+# placeholder values are legitimate documentation content) but are NOT
+# exempt from high-confidence secret/token checks (SECURITY_PATTERNS) — a
+# real secret pasted into a doc file is still a leak. This is the fix for
+# #2160: a real Telegram bot token committed to docs/DOCKER-TESTING.md went
+# undetected for months because the old should_skip_file() exempted docs
+# from every check, secrets included.
+is_doc_file() {
+    local filepath="$1"
+    case "$filepath" in
+        *.md|*.mdx|*.rst|*.txt|*.adoc) return 0 ;;
+    esac
+    return 1
+}
+
+# Returns 0 (skip) for the PII/instance/name check categories: files that
+# should never be scanned at all, plus doc files (which remain exempt from
+# these specific categories only — see is_doc_file() above).
+#
+# Note: the SECURITY_PATTERNS (secret/token) category deliberately does NOT
+# use this function — it is gated only by should_skip_file_common(), so it
+# does NOT exempt doc files. High-confidence secret shapes (Telegram bot
+# tokens, API keys, private keys, etc) are real leaks no matter which file
+# type they land in (see scan_diff() below and #2160).
+should_skip_file() {
+    local filepath="$1"
+    should_skip_file_common "$filepath" && return 0
+    is_doc_file "$filepath" && return 0
     return 1
 }
 
@@ -359,8 +396,10 @@ scan_diff() {
 
             local content="${raw_line:1}"  # strip leading '+'
 
-            # Skip if file should not be scanned
-            if [ -n "$current_file" ] && should_skip_file "$current_file"; then
+            # Skip files that should never be scanned by any check (hook
+            # source, test fixtures, binaries). Doc-file exemption is NOT
+            # applied here — it is narrower and category-specific (see below).
+            if [ -n "$current_file" ] && should_skip_file_common "$current_file"; then
                 continue
             fi
 
@@ -371,7 +410,17 @@ scan_diff() {
 
             local fp="${current_file:-<unknown>}"
 
+            # Doc files (*.md, *.mdx, *.rst, *.txt, *.adoc) are exempt from
+            # PII / instance / personal-name checks below, but NOT from the
+            # secret/token checks (SECURITY_PATTERNS) — see is_doc_file()
+            # and #2160 for why that split matters.
+            local skip_pii_checks=0
+            if [ -n "$current_file" ] && is_doc_file "$current_file"; then
+                skip_pii_checks=1
+            fi
+
             # --- Instance-specific patterns ---
+            if [ "$skip_pii_checks" -eq 0 ]; then
             for pattern_def in "${INSTANCE_PATTERNS[@]}"; do
                 local iname iregex idesc
                 iname="$(echo "$pattern_def" | awk -F'@@' '{print $1}')"
@@ -385,8 +434,10 @@ scan_diff() {
                     add_finding "$fp" "$line_num" "$idesc" "$content"
                 fi
             done
+            fi
 
             # --- PII patterns ---
+            if [ "$skip_pii_checks" -eq 0 ]; then
             for pattern_def in "${PII_PATTERNS[@]}"; do
                 local pname pregex pdesc
                 pname="$(echo "$pattern_def" | awk -F'@@' '{print $1}')"
@@ -421,8 +472,11 @@ scan_diff() {
 
                 add_finding "$fp" "$line_num" "$pdesc" "$content"
             done
+            fi
 
             # --- Security patterns ---
+            # Always runs, regardless of skip_pii_checks — doc files are
+            # scanned for secrets/tokens too (fix for #2160).
             for pattern_def in "${SECURITY_PATTERNS[@]}"; do
                 local sname sregex sdesc
                 sname="$(echo "$pattern_def" | awk -F'@@' '{print $1}')"
@@ -457,6 +511,7 @@ scan_diff() {
                 continue
             fi
 
+            if [ "$skip_pii_checks" -eq 0 ]; then
             for pattern_def in "${NAME_PATTERNS[@]}"; do
                 local nname nregex ndesc nallow
                 nname="$(echo "$pattern_def" | awk -F'@@' '{print $1}')"
@@ -481,6 +536,7 @@ scan_diff() {
 
                 add_finding "$fp" "$line_num" "$ndesc" "$content"
             done
+            fi
         fi
     done <<< "$diff_text"
 }

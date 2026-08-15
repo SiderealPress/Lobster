@@ -13,6 +13,11 @@
 #   - Per-name allowlist regex configured alongside each name in blocked-names.txt
 #   - Comments with # noname on the same line — allowed
 #
+# Also warns (with a confirm-to-proceed prompt) when the commit's author or
+# committer email matches a blocklist of known-leaked personal addresses, as
+# configured in ~/lobster-user-config/blocked-commit-emails.txt (gitignored,
+# private). See the "Commit-Author Email Check" section below for details.
+#
 # Bypass: git commit --no-verify
 #===============================================================================
 
@@ -271,5 +276,123 @@ scan_staged_diff_for_names() {
 }
 
 scan_staged_diff_for_names
+
+#===============================================================================
+# Commit-Author Email Check: warn on known-leaked personal emails
+#
+# Checks every email address that could end up recorded as this commit's
+# author or committer against a blocklist of known-leaked personal addresses,
+# configured in ~/lobster-user-config/blocked-commit-emails.txt (gitignored,
+# private). If no config file exists, this check is a silent no-op.
+#
+# Config file: ${LOBSTER_USER_CONFIG_DIR:-~/lobster-user-config}/blocked-commit-emails.txt
+# Format (one address per line):
+#   personal@example.com
+#   Lines starting with # are comments; empty lines are ignored. Matching is
+#   case-insensitive exact-address match (no regex).
+#
+# This is a warn + confirm gate, not a hard block — same UX as the PII
+# confirmation prompt in .githooks/pre-push. There can be legitimate reasons
+# to commit under one of these addresses, so this is a habit-breaking nudge,
+# not a lock.
+#
+# Sources checked (covers every way an author/committer email can be set):
+#   - git config user.email        (default author AND committer)
+#   - GIT_AUTHOR_EMAIL              (set by `git commit --author=...`)
+#   - GIT_COMMITTER_EMAIL           (set by `-c user.email=...` overrides)
+#
+# CI / non-interactive mode: if no controlling terminal is available (probed
+# by attempting to open /dev/tty), the warning is printed but the commit is
+# NOT blocked — same policy intent as pre-push's IS_TTY=0 handling. A
+# scripted/automated commit has no one to answer a confirmation prompt, so
+# blocking would just hang forever. (git connects a pre-commit hook's own
+# stdin to /dev/null unconditionally, so checking stdin — as pre-push does —
+# would never detect interactivity here; probing /dev/tty directly is the
+# reliable signal.)
+#
+# Bypass: git commit --no-verify
+#===============================================================================
+
+check_commit_author_email() {
+    local _cae_config="${LOBSTER_USER_CONFIG_DIR:-$HOME/lobster-user-config}/blocked-commit-emails.txt"
+
+    [ -f "$_cae_config" ] || return 0
+
+    local -a _cae_blocked=()
+    local _cae_line _cae_normalized
+    while IFS= read -r _cae_line; do
+        [[ "$_cae_line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${_cae_line// }" ]] && continue
+        _cae_normalized="$(echo "$_cae_line" | tr '[:upper:]' '[:lower:]' | xargs)"
+        [ -z "$_cae_normalized" ] && continue
+        _cae_blocked+=("$_cae_normalized")
+    done < "$_cae_config"
+
+    [ "${#_cae_blocked[@]}" -eq 0 ] && return 0
+
+    local -a _cae_candidates=()
+    local _cae_configured_email
+    _cae_configured_email="$(git config user.email 2>/dev/null || true)"
+    [ -n "$_cae_configured_email" ] && _cae_candidates+=("$_cae_configured_email")
+    [ -n "${GIT_AUTHOR_EMAIL:-}" ] && _cae_candidates+=("$GIT_AUTHOR_EMAIL")
+    [ -n "${GIT_COMMITTER_EMAIL:-}" ] && _cae_candidates+=("$GIT_COMMITTER_EMAIL")
+
+    local _cae_match=""
+    local _cae_candidate _cae_candidate_lc _cae_blocked_email
+    for _cae_candidate in "${_cae_candidates[@]}"; do
+        _cae_candidate_lc="$(echo "$_cae_candidate" | tr '[:upper:]' '[:lower:]')"
+        for _cae_blocked_email in "${_cae_blocked[@]}"; do
+            if [ "$_cae_candidate_lc" = "$_cae_blocked_email" ]; then
+                _cae_match="$_cae_candidate"
+                break 2
+            fi
+        done
+    done
+
+    [ -z "$_cae_match" ] && return 0
+
+    echo ""
+    echo -e "${RED}${BOLD}WARNING: commit author/committer email is on the leaked-email blocklist:${NC}"
+    echo -e "         ${BOLD}${_cae_match}${NC}"
+    echo "         This address has previously leaked into this repo's history."
+    echo "         (configure via ~/lobster-user-config/blocked-commit-emails.txt)"
+    echo ""
+
+    # Non-interactive (CI/scripted) commits: warn but never block — there is
+    # no one to answer a confirmation prompt.
+    #
+    # NOTE: git always connects a pre-commit hook's own stdin (fd 0) to
+    # /dev/null, regardless of whether the invoking shell is interactive —
+    # so `[ -t 0 ]` can never distinguish interactive from non-interactive
+    # here (verified empirically; this differs from pre-push, whose stdin
+    # instead carries the ref-update list). The only reliable signal is
+    # whether a controlling terminal is available at all: try to open
+    # /dev/tty for reading and see if that succeeds.
+    if ! exec 3</dev/tty 2>/dev/null; then
+        echo "No controlling terminal available — proceeding with warning only (not blocking)."
+        echo ""
+        return 0
+    fi
+    exec 3<&-
+
+    read -r -p "Continue committing with this email? [y/N]: " _cae_response </dev/tty
+    _cae_response="${_cae_response:-N}"
+    if [[ "$_cae_response" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+        echo ""
+        echo -e "${GREEN}Confirmed. Proceeding with commit.${NC}"
+        echo ""
+        return 0
+    else
+        echo ""
+        echo -e "${RED}Commit aborted.${NC} Fix your git author config and retry, e.g.:"
+        echo "  git config user.email \"you@example.com\""
+        echo ""
+        echo "Emergency bypass: git commit --no-verify"
+        echo ""
+        return 1
+    fi
+}
+
+check_commit_author_email || exit 1
 
 exit 0

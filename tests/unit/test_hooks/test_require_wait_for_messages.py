@@ -37,8 +37,12 @@ HOOK_PATH = HOOKS_DIR / "require-wait-for-messages.py"
 def _load_hook(monkeypatch, tmp_path, is_dispatcher_result: bool = False):
     """Load require-wait-for-messages.py as a fresh module for each test.
 
-    Patches session_role.is_dispatcher to return is_dispatcher_result so
-    tests don't depend on the live dispatcher marker file.
+    Patches is_subagent_hook (the agent_id fast path — issue #2218) on the
+    loaded module so tests can force dispatcher-vs-subagent classification
+    without needing to shape hook_input's agent_id field themselves. This
+    replaced session_role.is_dispatcher(), which depended on a one-shot
+    startup-flag file that is guaranteed absent for the vast majority of
+    dispatcher Stop events (see hook module docstring).
     """
     monkeypatch.setenv("LOBSTER_MAIN_SESSION", "1")
 
@@ -48,12 +52,11 @@ def _load_hook(monkeypatch, tmp_path, is_dispatcher_result: bool = False):
     if str(HOOKS_DIR) not in sys.path:
         sys.path.insert(0, str(HOOKS_DIR))
 
-    # Patch is_dispatcher before module execution so the module-level import
-    # picks up the mock. We patch the session_role module that is already loaded.
-    import session_role
-    monkeypatch.setattr(session_role, "is_dispatcher", lambda data: is_dispatcher_result)
-
     spec.loader.exec_module(mod)
+
+    # is_dispatcher_result=True → dispatcher → is_subagent_hook() must return False.
+    monkeypatch.setattr(mod, "is_subagent_hook", lambda data: not is_dispatcher_result)
+
     return mod
 
 
@@ -114,7 +117,7 @@ def test_no_lobster_main_session_exits_0(monkeypatch, tmp_path):
 
 
 def test_non_dispatcher_session_exits_0(monkeypatch, tmp_path):
-    """Subagent sessions (is_dispatcher returns False) exit 0."""
+    """Subagent sessions (is_subagent_hook returns True) exit 0."""
     mod = _load_hook(monkeypatch, tmp_path, is_dispatcher_result=False)
     hook_input = {
         "hook_event_name": "Stop",
@@ -122,6 +125,67 @@ def test_non_dispatcher_session_exits_0(monkeypatch, tmp_path):
     }
     code, _, _ = _run_hook(mod, hook_input)
     assert code == 0
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: issue #2218 — agent_id fast path, no mocking
+# ---------------------------------------------------------------------------
+
+
+def test_is_subagent_hook_true_when_agent_id_present():
+    """A non-empty agent_id means a subagent hook payload."""
+    spec = importlib.util.spec_from_file_location("require_wfm_pure", HOOK_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    if str(HOOKS_DIR) not in sys.path:
+        sys.path.insert(0, str(HOOKS_DIR))
+    spec.loader.exec_module(mod)
+    assert mod.is_subagent_hook({"agent_id": "agent-xyz"}) is True
+
+
+def test_is_subagent_hook_false_when_agent_id_absent():
+    """No agent_id key at all means the dispatcher's own Stop event."""
+    spec = importlib.util.spec_from_file_location("require_wfm_pure2", HOOK_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    if str(HOOKS_DIR) not in sys.path:
+        sys.path.insert(0, str(HOOKS_DIR))
+    spec.loader.exec_module(mod)
+    assert mod.is_subagent_hook({}) is False
+
+
+def test_dispatcher_without_wfm_blocks_across_many_stop_events_no_mock(monkeypatch, tmp_path):
+    """Regression test for issue #2218 — real is_subagent_hook(), no mocking.
+
+    Before the fix, this hook used session_role.is_dispatcher(), which reads a
+    one-shot startup-flag file deleted immediately after SessionStart. Every
+    dispatcher Stop event after that deletion — i.e. essentially all of them —
+    made 'only enforce for the dispatcher session' silently treat the
+    dispatcher as an exempt subagent, disabling the wait_for_messages
+    anti-stall block entirely. This test does not write the startup flag file
+    and does not mock dispatcher detection at all: it fires the Stop hook
+    several times in a row with a payload shaped exactly like a real
+    dispatcher Stop event (no 'agent_id' key) and asserts the block (exit 2)
+    fires every single time when wait_for_messages was not called.
+    """
+    monkeypatch.setenv("LOBSTER_MAIN_SESSION", "1")
+
+    spec = importlib.util.spec_from_file_location("require_wfm_real", HOOK_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    if str(HOOKS_DIR) not in sys.path:
+        sys.path.insert(0, str(HOOKS_DIR))
+    spec.loader.exec_module(mod)
+
+    tf = _make_jsonl_transcript(["mcp__lobster-inbox__some_other_tool"], tmp_path)
+
+    for i in range(4):
+        hook_input = {
+            "hook_event_name": "Stop",
+            "session_id": "dispatcher-session-real",
+            "transcript_path": tf,
+            # No "agent_id" key — this is what makes it the dispatcher.
+        }
+        code, _, stderr = _run_hook(mod, hook_input)
+        assert code == 2, f"Stop event #{i}: expected block (exit 2), got {code}"
+        assert "wait_for_messages" in stderr
 
 
 # ---------------------------------------------------------------------------
