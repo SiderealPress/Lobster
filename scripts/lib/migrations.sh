@@ -1032,7 +1032,7 @@ else:
     local OOM_CHECK_MARKER="# LOBSTER-OOM-CHECK"
     if ! crontab -l 2>/dev/null | grep -q "$OOM_CHECK_MARKER"; then
         "$LOBSTER_DIR/scripts/cron-manage.sh" add "$OOM_CHECK_MARKER" \
-            "*/10 * * * * cd $HOME && uv run $LOBSTER_DIR/scripts/oom-monitor.py --since-minutes 10 >> $WORKSPACE_DIR/logs/oom-monitor.log 2>&1 $OOM_CHECK_MARKER"
+            "*/10 * * * * cd $HOME && $HOME/.local/bin/uv run $LOBSTER_DIR/scripts/oom-monitor.py --since-minutes 10 >> $WORKSPACE_DIR/logs/oom-monitor.log 2>&1 $OOM_CHECK_MARKER"
         substep "Added OOM monitor cron entry (oom-monitor.py --since-minutes 10, every 10 min)"
         migrated=$((migrated + 1))
     fi
@@ -2064,7 +2064,7 @@ print(f'prune-pr-worktrees: {result.status}')
         chmod +x "$INFLIGHT_SCRIPT" 2>/dev/null || true
         if ! crontab -l 2>/dev/null | grep -qF "$INFLIGHT_MARKER"; then
             "$LOBSTER_DIR/scripts/cron-manage.sh" add "$INFLIGHT_MARKER" \
-                "*/3 * * * * uv run $INFLIGHT_SCRIPT >> $HOME/lobster-workspace/logs/inflight-reminders.log 2>&1 $INFLIGHT_MARKER" 2>/dev/null && {
+                "*/3 * * * * $HOME/.local/bin/uv run $INFLIGHT_SCRIPT >> $HOME/lobster-workspace/logs/inflight-reminders.log 2>&1 $INFLIGHT_MARKER" 2>/dev/null && {
                 substep "Added LOBSTER-INFLIGHT-REMINDERS cron entry (check-inflight-reminders.py, every 3 min)"
                 migrated=$((migrated + 1))
             } || warn "Could not add LOBSTER-INFLIGHT-REMINDERS cron entry — check cron-manage.sh"
@@ -2405,6 +2405,94 @@ M88_PYEOF
         fi
     else
         substep "Migration 98: settings.json or jq not found — skipping"
+    fi
+
+    # Migration 99: Fix bare `uv` cron entries that fail with "uv: not found".
+    # cron runs jobs with a minimal PATH (typically /usr/bin:/bin) that does not
+    # include ~/.local/bin, where the official uv installer places the binary.
+    # Migrations 28 (LOG-EXPORT) and 52 (GHOST-DETECTOR) already used the
+    # absolute path, but Migrations 53 (OOM-CHECK) and 87 (INFLIGHT-REMINDERS)
+    # shipped with a bare `uv run ...` invocation. Installs that ran those
+    # migrations before this fix landed have a crontab entry that has been
+    # silently failing on every single invocation ("/bin/sh: 1: uv: not found"
+    # in the job's log). Re-write each entry unconditionally (not gated on
+    # "marker missing") so already-broken installs get repaired, not just new
+    # ones. Idempotent: re-running when entries are already correct is a no-op
+    # (the grep -qF check below skips the rewrite).
+    local UV_BIN="$HOME/.local/bin/uv"
+    if [ -x "$UV_BIN" ]; then
+        local _m99_fixed=0
+
+        # Repairs a single cron entry atomically: builds the replacement
+        # crontab (original entry swapped for the new line) in a temp file
+        # WITHOUT touching the live crontab, then writes it in one shot.
+        # If the build or the write fails at any point, the live crontab is
+        # never touched and the original entry is left intact — the caller
+        # must not log success or count the migration as applied in that case.
+        # This replaces the previous two-step remove-then-add approach, which
+        # could silently drop the entry entirely if the re-add write failed
+        # after the removal had already succeeded.
+        _m99_repair_entry() {
+            local marker="$1" new_line="$2" tmp
+            tmp=$(mktemp) || { warn "Migration 99: could not create temp file for $marker repair"; return 1; }
+            if ! crontab -l 2>/dev/null | grep -v -F "# $marker" > "$tmp"; then
+                # grep -v exits 1 if the entry wasn't found in a non-empty
+                # crontab; that's fine, $tmp still holds the filtered output.
+                :
+            fi
+            echo "$new_line" >> "$tmp"
+            if crontab "$tmp" 2>/dev/null; then
+                rm -f "$tmp"
+                return 0
+            else
+                rm -f "$tmp"
+                warn "Migration 99: failed to write repaired $marker cron entry — leaving existing (broken) entry in place, will retry next upgrade"
+                return 1
+            fi
+        }
+
+        # OOM-CHECK
+        if crontab -l 2>/dev/null | grep -F "# LOBSTER-OOM-CHECK" | grep -qv "$UV_BIN"; then
+            if _m99_repair_entry "LOBSTER-OOM-CHECK" "8-59/10 * * * * cd $HOME && $UV_BIN run $LOBSTER_DIR/scripts/oom-monitor.py --since-minutes 10 >> $WORKSPACE_DIR/logs/oom-monitor.log 2>&1 # LOBSTER-OOM-CHECK"; then
+                substep "Migration 99: repaired LOBSTER-OOM-CHECK cron entry to use $UV_BIN"
+                _m99_fixed=1
+            fi
+        fi
+
+        # INFLIGHT-REMINDERS
+        if crontab -l 2>/dev/null | grep -F "# LOBSTER-INFLIGHT-REMINDERS" | grep -qv "$UV_BIN"; then
+            if _m99_repair_entry "LOBSTER-INFLIGHT-REMINDERS" "*/3 * * * * $UV_BIN run $LOBSTER_DIR/scripts/check-inflight-reminders.py >> $WORKSPACE_DIR/logs/inflight-reminders.log 2>&1 # LOBSTER-INFLIGHT-REMINDERS"; then
+                substep "Migration 99: repaired LOBSTER-INFLIGHT-REMINDERS cron entry to use $UV_BIN"
+                _m99_fixed=1
+            fi
+        fi
+
+        # GHOST-DETECTOR and LOG-EXPORT already use the absolute path in their
+        # originating migrations (52 and 28), but repair them too in case an
+        # install's crontab was hand-edited back to a bare `uv` at some point.
+        if crontab -l 2>/dev/null | grep -F "# LOBSTER-GHOST-DETECTOR" | grep -qv "$UV_BIN"; then
+            if _m99_repair_entry "LOBSTER-GHOST-DETECTOR" "2-59/5 * * * * cd $HOME && $UV_BIN run $LOBSTER_DIR/scripts/agent-monitor.py --alert --mark-failed >> $WORKSPACE_DIR/logs/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR"; then
+                substep "Migration 99: repaired LOBSTER-GHOST-DETECTOR cron entry to use $UV_BIN"
+                _m99_fixed=1
+            fi
+        fi
+
+        if crontab -l 2>/dev/null | grep -F "# LOBSTER-LOG-EXPORT" | grep -qv "$UV_BIN"; then
+            if _m99_repair_entry "LOBSTER-LOG-EXPORT" "0 3 * * * cd $LOBSTER_DIR && $UV_BIN run scheduled-tasks/export-logs.py # LOBSTER-LOG-EXPORT"; then
+                substep "Migration 99: repaired LOBSTER-LOG-EXPORT cron entry to use $UV_BIN"
+                _m99_fixed=1
+            fi
+        fi
+
+        unset -f _m99_repair_entry
+
+        if [ "$_m99_fixed" -eq 1 ]; then
+            migrated=$((migrated + 1))
+        else
+            substep "Migration 99: all uv-based cron entries already use absolute path — skipping"
+        fi
+    else
+        warn "Migration 99: uv not found at $UV_BIN — skipping cron entry repair"
     fi
 
     if [ "$migrated" -eq 0 ]; then
