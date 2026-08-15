@@ -589,3 +589,156 @@ class TestHookFailureSafety:
         assert log_path.exists(), "Expected failure to be logged"
         log_content = log_path.read_text()
         assert "auto-register-agent" in log_content
+
+
+# ---------------------------------------------------------------------------
+# inflight-work.jsonl "running" entry automation
+# (issue: automate-inflight-work-writes)
+# ---------------------------------------------------------------------------
+
+def _make_hook_input_with_tool_input(
+    tool_input: dict,
+    tool_response: object = None,
+    session_id: str = "sess-123",
+) -> dict:
+    return {
+        "hook_event_name": "PostToolUse",
+        "session_id": session_id,
+        "tool_name": "Agent",
+        "tool_input": tool_input,
+        "tool_response": tool_response,
+    }
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+class TestInflightRunningEntry:
+    """Automates the 'running' entry that was previously a manual dispatcher
+    Bash-piped-to-save-inflight-prompt.py step (see .claude/sys.dispatcher.bootup.md,
+    'In-Flight Work Tracking'). Confirmed unreliable in production: no new
+    inflight-work.jsonl entries were written since 2026-05-31 despite many
+    subsequent agent spawns.
+    """
+
+    def _inflight_work_file(self, tmp_path: Path) -> Path:
+        return tmp_path / "workspace" / "data" / "inflight-work.jsonl"
+
+    def _inflight_prompts_dir(self, tmp_path: Path) -> Path:
+        return tmp_path / "workspace" / "data" / "inflight-prompts"
+
+    def test_running_entry_written_on_real_agent_spawn(self, tmp_path):
+        """A real Agent call (agentId present) writes a 'running' entry with
+        the exact schema save-inflight-prompt.py produces -- prompt_file
+        reference, never the raw prompt inline."""
+        prompt = (
+            "---\ntask_id: t-inflight\nchat_id: 12345\nsource: telegram\n---\n"
+            "Do the thing."
+        )
+        hook_input = _make_hook_input_with_tool_input(
+            tool_input={
+                "prompt": prompt,
+                "subagent_type": "lobster-generalist",
+                "description": "Do the thing for the user",
+            },
+            tool_response={"agentId": "agent-inflight"},
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        entries = _read_jsonl(self._inflight_work_file(tmp_path))
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["task_id"] == "t-inflight"
+        assert entry["status"] == "running"
+        assert entry["chat_id"] == 12345
+        assert entry["subagent_type"] == "lobster-generalist"
+        assert entry["description"] == "Do the thing for the user"
+        assert "started_at" in entry
+        # Raw prompt must NEVER appear inline in the JSONL entry.
+        assert "prompt" not in entry
+        assert entry["prompt_file"] == str(
+            self._inflight_prompts_dir(tmp_path) / "t-inflight.txt"
+        )
+
+        # The full prompt is persisted to the referenced prompt_file.
+        prompt_file = Path(entry["prompt_file"])
+        assert prompt_file.exists()
+        assert prompt_file.read_text(encoding="utf-8") == prompt
+
+    def test_no_task_id_skips_inflight_write(self, tmp_path):
+        """A spawn with no task_id in the frontmatter writes no inflight entry
+        (agent_sessions.db registration still happens independently)."""
+        prompt = "No frontmatter here, just a prompt."
+        hook_input = _make_hook_input_with_tool_input(
+            tool_input={"prompt": prompt, "subagent_type": "lobster-generalist"},
+            tool_response={"agentId": "agent-no-task-id"},
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        assert not self._inflight_work_file(tmp_path).exists()
+        # agent_sessions.db registration is unaffected.
+        row = _get_row(tmp_path, "agent-no-task-id")
+        assert row is not None
+
+    def test_missing_agent_id_skips_inflight_write_too(self, tmp_path):
+        """No agentId in tool_response -- neither DB nor inflight-work.jsonl written."""
+        prompt = "---\ntask_id: t-noagentid\n---\nDo work."
+        hook_input = _make_hook_input_with_tool_input(
+            tool_input={"prompt": prompt},
+            tool_response={"result": "no agent id here"},
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+        assert not self._inflight_work_file(tmp_path).exists()
+
+    def test_inflight_write_failure_does_not_block_hook(self, tmp_path):
+        """If save-inflight-prompt.py's module can't be loaded, the hook still
+        exits 0 and still registers the DB row -- inflight bookkeeping is
+        best-effort, never blocking."""
+        import os
+
+        prompt = "---\ntask_id: t-inflight-fail\n---\nDo work."
+        hook_input = _make_hook_input_with_tool_input(
+            tool_input={"prompt": prompt},
+            tool_response={"agentId": "agent-inflight-fail"},
+        )
+        # The hook is exec'd fresh each time (see _run_hook), so failure-safety
+        # is verified by pointing LOBSTER_WORKSPACE at a read-only directory
+        # that blocks the inflight-prompts/ mkdir inside write_prompt_file.
+        ro_workspace = tmp_path / "ro-workspace"
+        (ro_workspace / "data").mkdir(parents=True)
+        os.chmod(str(ro_workspace / "data"), 0o444)
+
+        stdout_cap = StringIO()
+        stderr_cap = StringIO()
+        exit_code = None
+        with (
+            patch("sys.stdin", StringIO(json.dumps(hook_input))),
+            patch("sys.stdout", stdout_cap),
+            patch("sys.stderr", stderr_cap),
+            patch.dict("os.environ", {
+                "LOBSTER_MESSAGES": str(tmp_path / "messages"),
+                "LOBSTER_WORKSPACE": str(ro_workspace),
+            }),
+        ):
+            try:
+                hook_globals = {"__name__": "__main__", "__file__": str(HOOK_PATH)}
+                exec(compile(HOOK_PATH.read_text(), str(HOOK_PATH), "exec"), hook_globals)
+            except SystemExit as e:
+                exit_code = e.code
+
+        os.chmod(str(ro_workspace / "data"), 0o755)  # restore for cleanup
+        assert exit_code == 0
+
+        # DB registration still succeeded despite inflight-work.jsonl failure.
+        row = _get_row(tmp_path, "agent-inflight-fail")
+        assert row is not None

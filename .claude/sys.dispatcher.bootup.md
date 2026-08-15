@@ -234,13 +234,14 @@ Never say "Noted." alone — it doesn't tell the user whether work is happening.
    # Atomically: moves message inbox/ → processing/ AND sends the ack.
    # If return starts with "Warning:": claim succeeded, ack failed — proceed normally.
 2. Generate a short task_id (e.g. "fix-pr-475", "upstream-check")
-3. Write in-flight entry (see "In-flight work tracking" below)
-4. Task(
+3. Task(
        prompt="---\ntask_id: <task_id>\nchat_id: <chat_id>\nsource: <source>\nbackground: true\n---\n\n...",
        subagent_type="..."
    )
-5. mark_processed(message_id)
-6. Return to wait_for_messages() IMMEDIATELY
+   # The inflight-work.jsonl "running" entry is written automatically by a
+   # PostToolUse hook (see "In-Flight Work Tracking" below) — no separate step needed.
+4. mark_processed(message_id)
+5. Return to wait_for_messages() IMMEDIATELY
 ```
 
 > **Background intent via prompt frontmatter:** Always include `background: true` in the YAML
@@ -250,14 +251,13 @@ Never say "Noted." alone — it doesn't tell the user whether work is happening.
 > (issue #1939). The frontmatter key survives schema validation because it is part of the
 > `prompt` string, which is always a declared field.
 
-Agent registration is fully automatic — a PostToolUse hook fires after each Task call. You do not need to call `register_agent`.
+Agent registration is fully automatic — a PostToolUse hook fires after each Task call. You do not need to call `register_agent`, and you do not need to write an inflight-work.jsonl entry either (see "In-Flight Work Tracking" below).
 
 **Alternative (no ack needed):**
 ```
 1. mark_processing(message_id)
-2. Write in-flight entry (see "In-flight work tracking" below)
-3. ... spawn subagent ...
-4. mark_processed(message_id)
+2. ... spawn subagent ...
+3. mark_processed(message_id)
 ```
 
 Use `get_active_sessions` to answer "what agents are running?" at any time — accurate even across restarts.
@@ -266,36 +266,16 @@ Use `get_active_sessions` to answer "what agents are running?" at any time — a
 
 ## In-Flight Work Tracking
 
-Before calling the Agent tool to spawn any background subagent, persist the entry **and the full prompt** by piping JSON to the helper script:
+**This is now fully automatic — no dispatcher action required.** Both the "running" and "done" entries in `inflight-work.jsonl` are written by hooks, not by you:
 
-```python
-Bash(
-    'echo \'' + json.dumps({
-        "task_id": task_id,
-        "type": "<task type>",
-        "description": "<brief description>",
-        "started_at": datetime.utcnow().isoformat() + "Z",
-        "chat_id": chat_id,
-        "subagent_type": subagent_type,  # the value passed to the Agent tool
-        "status": "running",
-        "prompt": prompt,  # full prompt text — will be written to a separate file
-    }).replace("'", "'\\''") + '\' | uv run ~/lobster/scripts/save-inflight-prompt.py'
-)
-```
+- **"running" entry**: written by the `auto-register-agent.py` PostToolUse hook, which fires on every real `Agent` tool call (same hook that already auto-registers `agent_sessions.db`). It extracts `task_id`/`chat_id`/`source` from the prompt's YAML frontmatter (same parsing `auto-register-agent.py` already did) and persists the full prompt via `scripts/save-inflight-prompt.py`'s write logic, exactly as the old manual instructions described — just no longer dependent on you remembering to run it.
+- **"done" entry**: written by the `require-write-result.py` SubagentStop hook, at the moment it confirms a subagent called `write_result` with a valid `chat_id` — the same reliable trigger point the old manual instructions used, but now firing deterministically instead of depending on your later processing of the `subagent_result` message.
 
-**Why a script instead of `echo '...' >> file`:** Prompts contain newlines and special characters that make shell escaping unreliable. `save-inflight-prompt.py` writes the prompt to `~/lobster-workspace/data/inflight-prompts/<task_id>.txt` and appends a JSONL entry to `inflight-work.jsonl` with a `prompt_file` path — never inline. The raw prompt must NOT appear in the JSONL file.
-
-This is a **synchronous write on the main thread** — it must complete before the Agent call. Do not spawn a subagent for this write.
-
-**Idempotency requirement:** Prompts passed to the Agent tool must be written to be stateless and idempotent. If the same prompt is launched 10 hours later, it should produce similar or better results — not worse. Prompts must not assume any ambient state (open editor windows, in-progress filesystem writes, specific partial outputs) that may have changed. This is the prerequisite for reliable auto-restart after session death.
-
-**On SUBAGENT_RESULT**: immediately after `mark_processing` (before any branching), append a completion line. This fires for ALL result paths -- sent_reply_to_user, silent-drop, engineer→reviewer routing, and relay. "done" means the result arrived at the dispatcher -- not that the user has received the relay. Use a Bash append for "done" entries (no prompt involved):
-
-```python
-Bash(f'echo \'{{"task_id": "{task_id}", "completed_at": "{completed_at}", "status": "done"}}\' >> ~/lobster-workspace/data/inflight-work.jsonl')
-```
+You do not need to call `save-inflight-prompt.py` or append a Bash `echo` line yourself for either entry. (Historical note: this section previously instructed the dispatcher to perform both writes manually; that approach was found to be unreliable in production — no new entries were written for over two months despite many subagent spawns — which is why it was automated via hooks instead.)
 
 The log is append-only. A task is "done" if any entry with the same `task_id` has `"status": "done"`. Entries with `"status": "running"` and no corresponding `"status": "done"` entry are in-flight. The full prompt for any in-flight entry is readable from its `prompt_file` path.
+
+**Idempotency requirement still applies to prompt authoring:** Prompts passed to the Agent tool must be written to be stateless and idempotent. If the same prompt is launched 10 hours later, it should produce similar or better results — not worse. Prompts must not assume any ambient state (open editor windows, in-progress filesystem writes, specific partial outputs) that may have changed. This is the prerequisite for reliable auto-restart after session death.
 
 ---
 
@@ -446,12 +426,10 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
 
 ```
 1. mark_processing(message_id)
-   # Immediately write done entry -- fires for ALL subagent results regardless of relay path.
-   # "done" means the result arrived at the dispatcher, not that the user has received the relay.
-   if msg.get("task_id"):
-       task_id = msg["task_id"]
-       completed_at = datetime.utcnow().isoformat() + "Z"
-       Bash(f'echo \'{{"task_id": "{task_id}", "completed_at": "{completed_at}", "status": "done"}}\' >> ~/lobster-workspace/data/inflight-work.jsonl')
+   # NOTE: the inflight-work.jsonl "done" entry is now written automatically by
+   # require-write-result.py's SubagentStop hook at the moment write_result was
+   # confirmed called with a valid chat_id -- no dispatcher action needed here
+   # (see "In-Flight Work Tracking" above). Do not add a manual append.
 
 2. if msg.get("sent_reply_to_user") == True:
        mark_processed(message_id)
