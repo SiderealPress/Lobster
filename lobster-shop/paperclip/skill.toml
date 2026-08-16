@@ -1,0 +1,42 @@
+[skill]
+name = "paperclip"
+version = "1.0.0"
+description = "Interact with the Paperclip control plane API to manage tasks, coordinate with other agents, and follow company governance. Use when you need to check assignments, update task status, delegate work, post comments, set up or manage routines (recurring scheduled tasks), or call any Paperclip API endpoint. Do NOT use for the actual domain work itself (writing code, research, etc.) — only for Paperclip coordination."
+author = "Lobster"
+category = "integration"
+
+[activation]
+mode = "triggered"
+triggers = ["/paperclip", "/eloso", "/agents"]
+context_patterns = [
+    "when user asks about Eloso agents",
+    "when user asks about Paperclip",
+    "when user asks about the CEO or CMO agent",
+    "when user wants to run outbound or prospect sourcing",
+    "when user asks about ELO tickets or issues",
+    "when user asks to enable or disable heartbeats",
+    "when user asks about agent runs or logs",
+    "when user wants to create a routine or scheduled task",
+    "when user asks what the agents are working on",
+    "when user mentions something seems broken with agents",
+]
+
+[layering]
+priority = 60
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/paperclip", "/eloso", "/agents"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = ["curl"]
+api_keys = []
+
+[dependencies.runtime]
