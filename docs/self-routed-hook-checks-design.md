@@ -11,7 +11,7 @@ original draft and reads in the future tense/design-proposal voice.
 
 ## 1. The ask
 
-Drew, 2026-08-05: "Calling the anthropic API costs way too much money. Zoom out and
+aeschylus, 2026-08-05: "Calling the anthropic API costs way too much money. Zoom out and
 design a way for the Lobster instance to call itself in such situations." Concrete
 example: the semantic PII/secret detection use case from BIS-755 (the pre-push PII
 scanner built in PR #2156/#2169, found uninstalled/inert, closed via BIS-756 with a
@@ -42,7 +42,7 @@ regex hook is sufficient. Nothing in this design changes that.
 
 ### Shape B: An agent (dispatcher or subagent) is running `git push` via its Bash tool
 
-This is the case Drew's follow-up is actually about. When a Claude Code agent
+This is the case aeschylus's follow-up is actually about. When a Claude Code agent
 (e.g. a `functional-engineer` subagent finishing up a PR) calls the `Bash` tool
 with a command containing `git push`, Claude Code itself sits in the loop as the
 tool dispatcher. A **PreToolUse hook** fires before the command executes, reads
@@ -72,7 +72,7 @@ is created. No inbox message is written. No polling. This is not a hypothetical 
   issue #582, which shipped it as v1 with block mode called out as deliberate
   future work once pattern coverage is trusted.
 
-So the mechanism Drew is asking for is not new to this system. It's the
+So the mechanism aeschylus is asking for is not new to this system. It's the
 established PreToolUse-block-and-inject pattern, applied to one more tool call
 shape (`Bash` commands containing `git push`) that doesn't have it yet.
 
@@ -97,12 +97,12 @@ When a Claude Code agent runs `git push` through the `Bash` tool, stdin is not a
 TTY. So today, an agent-initiated push with real findings gets warned in the
 Bash output and **the push proceeds anyway** — the exact interactive
 confirm-and-abort flow a human gets is silently skipped for agents. This is a real,
-currently-live gap, independent of whether Drew asked about it: agent-driven
+currently-live gap, independent of whether aeschylus asked about it: agent-driven
 pushes get weaker protection than human-driven ones, for a reason (no TTY to
 prompt) that a Claude Code PreToolUse hook does not share, because it talks to the
 agent's own reasoning loop instead of a human at a keyboard.
 
-## 4. Disentangling Drew's actual concern(s)
+## 4. Disentangling aeschylus's actual concern(s)
 
 All three of the candidate concerns are real and this design addresses all of them:
 
@@ -181,7 +181,7 @@ issue #582 for `secret-scanner.py`), matcher `Bash`.
 
 **Message-queue / inbox round-trip** (a hook writes a message into
 `~/messages/inbox/` and blocks/polls for a dispatcher or subagent response) — this
-was my first-pass answer before Drew's follow-up narrowed the ask, and it's worth
+was my first-pass answer before aeschylus's follow-up narrowed the ask, and it's worth
 recording why it's the wrong tool for Shape B specifically, while still being the
 right *fallback* for a case this design doesn't need to solve today:
 
@@ -208,7 +208,7 @@ right *fallback* for a case this design doesn't need to solve today:
   task brief warned against.
 
 **A fresh Anthropic API call from inside any hook** — explicitly rejected per
-Drew's original directive (this is the thing BIS-756 already decided against for
+aeschylus's original directive (this is the thing BIS-756 already decided against for
 the PII scanner). Nothing in this design revisits that; §5 has zero API calls in
 the hook itself under any code path.
 
@@ -247,7 +247,7 @@ the common case and no new architecture.
 Do not build: a generic hook-to-dispatcher message bus, or any hook that calls
 the Anthropic API directly. Neither is needed for the use case in front of us.
 
-This is a design doc only. If Drew wants to proceed, the natural next step is a
+This is a design doc only. If aeschylus wants to proceed, the natural next step is a
 GitHub issue under the BIS-755 remediation umbrella (sibling to BIS-756/757/758)
 scoped exactly to §5, handed to `functional-engineer` with the same
 proof-of-work bar (falsifiable automated test + manual demonstration) used on the
