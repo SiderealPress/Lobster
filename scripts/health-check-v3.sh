@@ -1526,8 +1526,8 @@ get_descendant_pids() {
 #===============================================================================
 check_session_age() {
     # Support SESSION_AGE_LIMIT_SECONDS=0 as an explicit disable signal.
-    # Use this when CC no longer enforces the 7440s hard session limit and
-    # the proactive restarts are causing unnecessary disruption.
+    # Use this when the proactive restarts are causing unnecessary disruption
+    # and are not needed for this install.
     if [[ "$SESSION_AGE_LIMIT_SECONDS" -eq 0 ]]; then
         log_info "Session age: check disabled (SESSION_AGE_LIMIT_SECONDS=0)"
         return 0
@@ -1608,7 +1608,7 @@ check_session_age() {
     # even if the session exits immediately once SIGTERM is delivered — if the
     # alert were sent after kill -TERM, a fast process death could drop it
     # entirely. Text is plain-language (a planned restart, not a crash), not
-    # internal state (PID, session age, hard-limit seconds) — the previous
+    # internal state (PID, session age, restart-threshold seconds) — the previous
     # wording gave the user no way to distinguish a graceful restart from a
     # health-check kill or OOM crash. Still gated on LOBSTER_DEBUG (2026-06-14
     # noise-reduction change) — this fix only corrects ordering and wording for
@@ -2161,7 +2161,7 @@ main() {
         boot_grace=true
     fi
 
-    # --- Session age check: proactive restart before 7440s CC hard limit ---
+    # --- Session age check: proactive restart at SESSION_AGE_LIMIT_SECONDS ---
     # Suppressed during boot grace: a session that just started cannot be near
     # the limit, and a stale timestamp from a crashed previous session could
     # cause a false SIGTERM during the new session's first minutes.

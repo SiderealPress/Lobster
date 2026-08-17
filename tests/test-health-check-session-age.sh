@@ -2,12 +2,16 @@
 #===============================================================================
 # Test Suite: Health Check v3 - Session Age Check (issue #2059)
 #
-# Tests for check_session_age() — the proactive restart before the 7440s CC
-# hard session lifetime limit.
+# Tests for check_session_age() — the proactive restart at
+# SESSION_AGE_LIMIT_SECONDS (7200s), an operational precaution against
+# sessions dying uncleanly (no Stop hook, no tombstone) around that age.
 #
-# CC kills the dispatcher at exactly 7440s with no Stop hook. check_session_age()
-# triggers a graceful SIGTERM at SESSION_AGE_LIMIT_SECONDS (7200s) so the
-# Stop hook fires cleanly before the hard limit hits.
+# NOTE: issue #2059's original justification — that Claude Code enforces a
+# hard 7440s session lifetime — was based on only 2 observed data points and
+# was never confirmed against Anthropic documentation. See issue #2157 for
+# the reassessment. check_session_age() triggers a graceful SIGTERM at
+# SESSION_AGE_LIMIT_SECONDS (7200s) regardless of whether that original
+# claim holds — the precaution has value on its own.
 #
 # Tests:
 #   1. No start timestamp file → returns 0 (GREEN, no action)
