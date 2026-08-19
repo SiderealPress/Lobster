@@ -3557,6 +3557,42 @@ apply_private_overlay
 run_hook "post-install.sh"
 
 #===============================================================================
+# Run Migrations
+#
+# install.sh previously never called this at all — migrations only ran when
+# someone explicitly invoked upgrade.sh on an existing install. A
+# reimage-via-restore (old ~/lobster-config/, ~/lobster/, etc. copied onto a
+# fresh host before install.sh runs) looks indistinguishable from a fresh
+# install here, so every config.env-touching migration was silently skipped
+# forever unless upgrade.sh was manually re-run afterward (issue #2200).
+#
+# Running the same migration runner unconditionally, on every install.sh run
+# (fresh or restored-config), guarantees config.env and other migration-
+# covered state always end up fully up to date — matching what a fresh
+# upgrade.sh run would produce. Migrations are idempotent (each checks
+# whether its change is already applied before acting), so this is safe to
+# run on a genuinely fresh install too.
+#===============================================================================
+
+step "Running migration checks..."
+
+DRY_RUN=false
+LOBSTER_DIR="$INSTALL_DIR"
+VENV_DIR="$INSTALL_DIR/.venv"
+
+# substep() and log_to_file() are used by run_migrations() (via
+# scripts/lib/migrations.sh) but install.sh has no equivalents of its own —
+# upgrade.sh's substep() is a formatted sub-step log line, and its
+# log_to_file() appends to a persistent upgrade log. install.sh keeps no such
+# log, so this is a no-op stub; substep() reuses install.sh's own info().
+substep() { info "$1"; }
+log_to_file() { :; }
+
+# shellcheck source=scripts/lib/migrations.sh
+source "${INSTALL_DIR}/scripts/lib/migrations.sh"
+run_migrations
+
+#===============================================================================
 # Start Services
 #===============================================================================
 
