@@ -1976,11 +1976,28 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         if systemctl is-enabled "$_m83_timer" &>/dev/null; then
             substep "prune-pr-worktrees systemd timer already enabled — skipping Migration 83"
         else
+            # NOTE: We deliberately do NOT `import mcp.systemd_jobs` (or add
+            # src/mcp/__init__.py to make that importable). src/mcp/ shares its
+            # top-level name with the pip-installed `mcp` SDK; making it a real
+            # package makes it win import resolution ahead of the SDK everywhere
+            # `src/` is on sys.path (e.g. inbox_server.py), which crash-loops
+            # lobster-mcp-local (see issue #2239 / PR #2238 revert). Instead we
+            # load systemd_jobs.py directly by file path via importlib, which
+            # needs no package at all — same pattern already used in
+            # src/bisque/relay_server.py and src/bot/sms_router.py for the same
+            # collision on src/mcp/log_utils.py.
             uv run --project "$LOBSTER_DIR" python -c "
-import asyncio, sys
-sys.path.insert(0, '$LOBSTER_DIR/src')
-from mcp.systemd_jobs import create_job
-result = asyncio.run(create_job(
+import asyncio
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location('lobster_mcp_systemd_jobs', '$LOBSTER_DIR/src/mcp/systemd_jobs.py')
+systemd_jobs = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = systemd_jobs  # required: systemd_jobs.py uses @dataclass, which
+                                        # resolves its module via sys.modules at class-body eval time
+spec.loader.exec_module(systemd_jobs)
+
+result = asyncio.run(systemd_jobs.create_job(
     name='prune-pr-worktrees',
     schedule='*-*-* 03:00:00',
     command='$_m83_cmd',
@@ -1990,7 +2007,7 @@ print(f'prune-pr-worktrees: {result.status}')
 " 2>/dev/null && {
                 substep "Registered prune-pr-worktrees systemd timer (daily at 03:00 UTC)"
                 migrated=$((migrated + 1))
-            } || warn "Could not register prune-pr-worktrees — try: uv run python -c \"import asyncio; from src.mcp.systemd_jobs import create_job; ...\""
+            } || warn "Could not register prune-pr-worktrees — try: uv run python -c \"import asyncio, importlib.util, sys; spec = importlib.util.spec_from_file_location('lobster_mcp_systemd_jobs', '\$LOBSTER_DIR/src/mcp/systemd_jobs.py'); m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m); ...\""
         fi
     else
         warn "prune-pr-worktrees.py not found at $_m83_script or uv unavailable — skipping Migration 83"
