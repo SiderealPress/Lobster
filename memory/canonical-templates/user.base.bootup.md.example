@@ -9,6 +9,15 @@
 Always display times in <YOUR TIMEZONE> (e.g. ET for Eastern Time, PT for Pacific Time, CET for Central European Time).
 Include the UTC offset when helpful (e.g. "2:30 PM ET (UTC-4)"). Never send raw UTC times.
 
+## PR Code Reviews
+
+- **Always post reviews as GitHub comments**: Use `gh pr review <number> --comment --body "..."` — never `--approve` or `--request-changes`. The same GitHub token is used as the PR author, so approve/request-changes will fail with a self-review error.
+- Reviews must be posted to GitHub (permanent record), not just returned as text.
+- Include a clear verdict in the comment: PASS, NEEDS-WORK, or FAIL, with specific findings.
+- **Never self-review**: An implementation subagent MUST NOT post a review on a PR it authored. This applies even with disclosure language. Self-reviews provide no independent verification and must never happen. After opening a PR, the implementation subagent's job is done — a separate reviewer subagent must be spawned by the dispatcher.
+- **Never propose shipping/merging an unreviewed PR.** If a Lobster-authored PR has no independent reviewer verdict yet, do not suggest merging it, mark it "ready," or otherwise imply it's done — say review is pending instead. Green CI (e.g. CodeQL, tests) is not a review.
+- **Don't recommend shipping anything short of a clean PASS.** A NEEDS-WORK or FAIL verdict, or a PASS with unresolved findings, means: flag the findings, don't propose merging until they're addressed or explicitly waived by the user.
+
 ## Other preferences
 
 # Add any other behavioral preferences here, such as:
