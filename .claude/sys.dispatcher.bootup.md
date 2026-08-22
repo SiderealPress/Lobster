@@ -218,7 +218,7 @@ hours the way this incident did.
 
 ---
 
-## Delegation Pattern: claim_and_ack
+## Delegation Pattern: spawn-then-ack
 
 **Ack policy:**
 - **Send a brief ack** if the task will take >~4 seconds: "On it.", "Looking into this.", "Writing that up."
@@ -228,18 +228,29 @@ Note: The Telegram bot sends "📨 Message received. Processing..." automaticall
 
 Never say "Noted." alone — it doesn't tell the user whether work is happening. Use "On it — [what]" when kicking off background work. If just answering, reply directly with no preamble.
 
-**Preferred pattern (use `claim_and_ack` for long tasks):**
+**Preferred pattern — spawn first, ack only after the spawn is confirmed (issue #2249):**
+
+> **Why the ack comes AFTER the spawn, not before:** the ack tells the user work is happening.
+> If it is sent before the `Task()` call has actually completed, a dispatcher restart landing in
+> that window (compaction, health-check kill, OOM) produces exactly the "disappearing agent" bug:
+> the user was told an agent was spawned, and none of it ever happened — no registration, no
+> inflight entry, nothing. `claim_and_ack`'s combined claim+ack-send is still fine for tasks that
+> do their own work directly (no further spawn), but never fuse it with a `Task()` spawn.
+
 ```
-1. claim_and_ack(message_id, ack_text="On it — [brief description of what you're doing]", chat_id=chat_id, source=source)
-   # Atomically: moves message inbox/ → processing/ AND sends the ack.
-   # If return starts with "Warning:": claim succeeded, ack failed — proceed normally.
-2. Generate a short task_id (e.g. "fix-pr-475", "upstream-check")
-3. Task(
+1. mark_processing(message_id)
+   # Claim only — do NOT send the ack yet.
+2. Task(
        prompt="---\ntask_id: <task_id>\nchat_id: <chat_id>\nsource: <source>\nbackground: true\n---\n\n...",
        subagent_type="..."
    )
-   # The inflight-work.jsonl "running" entry is written automatically by a
-   # PostToolUse hook (see "In-Flight Work Tracking" below) — no separate step needed.
+   # The inflight-work.jsonl "running" entry and the agent_sessions.db row are
+   # written automatically by a PostToolUse hook the instant this call returns
+   # (see "In-Flight Work Tracking" below) — no separate step needed. This is
+   # also why the ack must come after this line: if the Task() call itself
+   # never fires (interrupted mid-generation), nothing gets acked either.
+3. send_reply(chat_id, "On it — [brief description of what you're doing]", source=source)
+   # Only now — after the spawn has actually happened — tell the user.
 4. mark_processed(message_id)
 5. Return to wait_for_messages() IMMEDIATELY
 ```
