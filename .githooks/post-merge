@@ -63,3 +63,30 @@ cat > "$MSG_FILE" << EOF
 EOF
 
 echo "[post-merge] Queued dependency upgrade reminder to Lobster inbox."
+
+# ---------------------------------------------------------------------------
+# Hook-wiring drift reconciliation (issue #2249 — "disappearing agent problem")
+#
+# Hooks added to install.sh's setup_claude_hooks() after an instance's initial
+# install previously never reached that instance: this git-pull upgrade path
+# only ever queued the reminder above (which just runs `uv pip install -e .`)
+# and never re-ran install.sh or any settings.json reconciliation. Confirmed
+# live: hooks/auto-register-agent.py sat completely unwired for an unknown
+# period as a direct result, causing spawned background agents to leave zero
+# trace anywhere the moment anything went wrong.
+#
+# reconcile-claude-hooks.py is a small, idempotent, self-contained script
+# (deliberately not a refactor of setup_claude_hooks()) that re-applies a
+# short list of CRITICAL hooks to settings.json if missing. Run it here, on
+# every git pull, so hook-wiring drift can never silently persist again.
+# Best-effort: never blocks the merge, never fails the hook.
+# ---------------------------------------------------------------------------
+LOBSTER_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+RECONCILE_SCRIPT="$LOBSTER_DIR/scripts/reconcile-claude-hooks.py"
+if [ -f "$RECONCILE_SCRIPT" ]; then
+    if command -v uv >/dev/null 2>&1; then
+        uv run "$RECONCILE_SCRIPT" 2>&1 | sed 's/^/[post-merge] /' || true
+    else
+        python3 "$RECONCILE_SCRIPT" 2>&1 | sed 's/^/[post-merge] /' || true
+    fi
+fi

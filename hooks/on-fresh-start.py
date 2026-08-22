@@ -98,6 +98,16 @@ import session_role  # noqa: E402 — path insert must precede this
 
 AGENT_MONITOR = Path(os.path.expanduser("~/lobster/scripts/agent-monitor.py"))
 
+# reconcile-claude-hooks.py self-heals drift between critical hooks this
+# codebase depends on (starting with auto-register-agent.py) and what is
+# actually wired into settings.json. Existing git-based installs upgrade via
+# `.githooks/post-merge`, which never re-runs install.sh's hook-wiring logic —
+# so a hook added after initial install can silently stay unwired forever.
+# Running this on every fresh dispatcher start closes that gap (issue #2249).
+RECONCILE_CLAUDE_HOOKS = Path(
+    os.path.expanduser("~/lobster/scripts/reconcile-claude-hooks.py")
+)
+
 # on-compact.py writes last_compaction_ts to this file on every compaction.
 COMPACTION_STATE_FILE = Path(
     os.environ.get(
@@ -635,6 +645,55 @@ def _mark_all_running_failed() -> None:
         )
 
 
+def _reconcile_claude_hooks() -> None:
+    """Run reconcile-claude-hooks.py via uv to self-heal hook-wiring drift.
+
+    Issue #2249: hooks added to install.sh's setup_claude_hooks() after an
+    instance's initial install never reach that instance, because the
+    git-pull upgrade path (.githooks/post-merge) never re-runs install.sh.
+    Running this reconciler on every fresh dispatcher start guarantees
+    critical hooks (starting with auto-register-agent.py) are re-wired
+    automatically, not just at install time.
+
+    Exit code 1 means "repaired something" — informational, not an error.
+    Exit code 2 means a fatal error (e.g. corrupt settings.json) — logged but
+    never raised, so it can't block the dispatcher from starting.
+    """
+    if not RECONCILE_CLAUDE_HOOKS.exists():
+        print(
+            f"[on-fresh-start] reconcile-claude-hooks not found at {RECONCILE_CLAUDE_HOOKS}; skipping",
+            file=sys.stderr,
+        )
+        return
+    try:
+        result = subprocess.run(
+            ["uv", "run", str(RECONCILE_CLAUDE_HOOKS)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 1:
+            print(
+                f"[on-fresh-start] reconcile-claude-hooks repaired drift:\n{result.stderr.strip()}",
+                file=sys.stderr,
+            )
+        elif result.returncode == 2:
+            print(
+                f"[on-fresh-start] reconcile-claude-hooks fatal error (settings.json unchanged):\n{result.stderr.strip()}",
+                file=sys.stderr,
+            )
+    except subprocess.TimeoutExpired:
+        print(
+            "[on-fresh-start] reconcile-claude-hooks timed out after 15s",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[on-fresh-start] unexpected error running reconcile-claude-hooks: {exc}",
+            file=sys.stderr,
+        )
+
+
 def main() -> None:
     # Only fire for Lobster-managed sessions.
     if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
@@ -666,6 +725,11 @@ def main() -> None:
     _compact_inflight_work()
 
     _mark_all_running_failed()
+
+    # Self-heal hook-wiring drift (issue #2249). Settings.json is only read by
+    # Claude Code at process start, so this belongs alongside the other
+    # fresh-restart-only checks above, not the compaction path.
+    _reconcile_claude_hooks()
 
     # Safety net for issue #909: if catchup state is stale (last_catchup_ts is
     # > 30 min old or absent), inject a compact-reminder into the inbox. This
