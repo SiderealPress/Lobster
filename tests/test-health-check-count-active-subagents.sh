@@ -122,6 +122,25 @@ make_db "$MESSAGES_DIR/config/agent_sessions.db" \
 result=$(count_active_subagents)
 assert_eq "$result" "2"
 
+# -------------------------------------------------------------------
+# Test 5 (issue #2226): dispatcher row with agent_type=NULL → count is 0
+#
+# session_start()'s agent_type parameter is optional; when the dispatcher's
+# own bootup call omits it, this row shape (agent_type=NULL) is what actually
+# lands in production. Pre-#2226-fix, DISPATCHER_EXCLUSION_SQL's
+# COALESCE(agent_type, '') != 'dispatcher' evaluated to '' != 'dispatcher' →
+# TRUE for this row, so it was NOT excluded here either — same bug class as
+# periodic-self-check.sh's PENDING_COUNT, just via this call site instead.
+# -------------------------------------------------------------------
+begin_test "Dispatcher row (agent_type=NULL) → count is 0, not 1 (issue #2226)"
+MESSAGES_DIR="$TEST_TMPDIR/dispatcher-null-agent-type"
+mkdir -p "$MESSAGES_DIR/config"
+sqlite3 "$MESSAGES_DIR/config/agent_sessions.db" \
+    "CREATE TABLE agent_sessions (id TEXT, agent_type TEXT, status TEXT); \
+     INSERT INTO agent_sessions (id, agent_type, status) VALUES ('lobster-dispatcher', NULL, 'running');"
+result=$(count_active_subagents)
+assert_eq "$result" "0"
+
 #===============================================================================
 # Syntax check
 #===============================================================================

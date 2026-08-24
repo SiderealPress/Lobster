@@ -103,7 +103,11 @@ from agents.pid_liveness import is_pid_alive  # noqa: E402
 # the dispatcher's row from this script's pipeline entirely — it never
 # reaches classify_agent(), so no PID-staleness race window can misclassify
 # it, regardless of restart timing.
-from utils.agent_types import DISPATCHER_EXCLUSION_SQL, is_dispatcher_agent_type  # noqa: E402
+from utils.agent_types import (  # noqa: E402
+    DISPATCHER_AGENT_ID as _DISPATCHER_AGENT_ID,
+    DISPATCHER_EXCLUSION_SQL,
+    is_dispatcher_agent_type,
+)
 
 # Age threshold for treating an unregistered output file as "active" (minutes)
 UNREGISTERED_ACTIVE_THRESHOLD_MINUTES = 30.0
@@ -111,7 +115,12 @@ UNREGISTERED_ACTIVE_THRESHOLD_MINUTES = 30.0
 # The static agent_id used when the dispatcher registers itself via session_start().
 # Matches the value used in the dispatcher bootup instructions:
 #   session_start(agent_id="lobster-dispatcher", agent_type="dispatcher", ...)
-_DISPATCHER_AGENT_ID = "lobster-dispatcher"
+#
+# Issue #2226: this is now imported from utils.agent_types as the single
+# source of truth (aliased to the pre-existing local name so every other
+# reference in this file — _is_dispatcher_agent(), mark_failed_all_ghosts(),
+# send_alert() — is unchanged) instead of being hand-copied here, closing the
+# same class of drift DISPATCHER_EXCLUSION_SQL already closed for the SQL side.
 
 
 @dataclass(frozen=True)
