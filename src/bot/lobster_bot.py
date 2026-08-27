@@ -78,8 +78,14 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
+from telegram.error import TimedOut, NetworkError
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ChatMemberHandler, MessageReactionHandler, filters, ContextTypes
 from collections import deque
+
+# Retry policy for downloading files from Telegram (get_file + download_to_drive).
+# A single transient network hiccup should not drop a user's photo permanently.
+FILE_DOWNLOAD_MAX_ATTEMPTS = 3
+FILE_DOWNLOAD_BACKOFF_SECONDS = 1.0
 
 
 # URLs longer than this are copy-paste targets (e.g. OAuth flows).  Telegram
@@ -998,6 +1004,41 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     log.info(f"Wrote callback message to inbox: {msg_id}")
 
 
+async def _download_telegram_file_with_retry(
+    context: ContextTypes.DEFAULT_TYPE,
+    file_id: str,
+    dest_path: Path,
+    *,
+    max_attempts: int = FILE_DOWNLOAD_MAX_ATTEMPTS,
+    backoff_seconds: float = FILE_DOWNLOAD_BACKOFF_SECONDS,
+) -> None:
+    """Download a Telegram file (get_file + download_to_drive) with retry.
+
+    Retries on telegram.error.TimedOut / telegram.error.NetworkError, which are
+    the transient-failure classes for a getFile + download round trip (e.g. a
+    ReadTimeout under network jitter). Note NetworkError is python-telegram-bot's
+    base class for several non-transient errors too (e.g. BadRequest), so those
+    are retried as well; only exceptions outside the NetworkError/TimedOut
+    hierarchy (e.g. Forbidden) fail fast. Uses linear backoff between attempts.
+    Re-raises the last exception if all attempts are exhausted.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            file = await context.bot.get_file(file_id)
+            await file.download_to_drive(dest_path)
+            return
+        except (TimedOut, NetworkError) as e:
+            last_exc = e
+            log.warning(
+                f"Telegram file download attempt {attempt}/{max_attempts} failed "
+                f"for file_id={file_id}: {e}"
+            )
+            if attempt < max_attempts:
+                await asyncio.sleep(backoff_seconds * attempt)
+    raise last_exc
+
+
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
     """Handle photo messages: download and save to inbox with metadata."""
     user = update.effective_user
@@ -1014,10 +1055,9 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # Get the largest photo size
         photo = message.photo[-1]
 
-        # Download the photo
-        file = await context.bot.get_file(photo.file_id)
+        # Download the photo (with retry on transient network/timeout errors)
         image_path = IMAGES_DIR / f"{msg_id}.jpg"
-        await file.download_to_drive(image_path)
+        await _download_telegram_file_with_retry(context, photo.file_id, image_path)
         log.info(f"Downloaded photo to: {image_path}")
 
         caption = message.caption or ""
@@ -1087,13 +1127,16 @@ async def _handle_media_group_photo(update: Update, context: ContextTypes.DEFAUL
 
     try:
         photo = message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
         # Use msg_id (which is unique per photo update) as the filename
         image_path = IMAGES_DIR / f"{msg_id}.jpg"
-        await file.download_to_drive(image_path)
+        await _download_telegram_file_with_retry(context, photo.file_id, image_path)
         log.info(f"Downloaded media group photo to: {image_path}")
     except Exception as e:
         log.error(f"Error downloading media group photo: {e}", exc_info=True)
+        try:
+            await message.reply_text("❌ Failed to process a photo in this album.")
+        except Exception:
+            log.error("Failed to send media-group photo failure notice", exc_info=True)
         return
 
     if group_id not in _media_group_buffers:
@@ -2179,7 +2222,18 @@ async def run_bot():
     log.info("Watching outbox for replies...")
 
     # Create bot application
-    bot_app = Application.builder().token(BOT_TOKEN).write_timeout(30).build()
+    # connect_timeout/read_timeout are bumped from the python-telegram-bot
+    # default (5s) to 20s: too tight for a getFile + download round trip on
+    # photos/documents, and the source of issue #2252 (a ReadTimeout on
+    # get_file with no retry, causing total data loss for the message).
+    bot_app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .connect_timeout(20)
+        .read_timeout(20)
+        .write_timeout(30)
+        .build()
+    )
 
     # Add handlers
     bot_app.add_handler(CommandHandler("start", start_command))
