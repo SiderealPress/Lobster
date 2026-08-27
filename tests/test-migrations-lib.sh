@@ -212,6 +212,29 @@ exit 0
 EOF
 chmod +x "$FAKE_BIN_DIR/sudo"
 
+# Fake pidof stub (tests/test-migrations-lib.sh, issue #2246 follow-up) -
+# Migration 55 (systemd-timer-from-jobs.json) and a couple of other
+# migrations gate their body on `pidof systemd >/dev/null 2>&1` succeeding,
+# i.e. "are we actually running under systemd as PID 1". That's true on a
+# real Lobster host but false in this suite's Docker test container
+# (tests/docker/Dockerfile.test runs debian:bookworm-slim without systemd as
+# PID 1), so those migration branches - including the one this suite's
+# sudo-tee assertion below depends on - would otherwise be silently skipped
+# there, and the assertion would hard-fail even though the crontab/sudo
+# isolation itself works correctly. Stub `pidof` to always report systemd as
+# present so Migration 55 actually runs and gets exercised in every
+# environment this suite runs in, the same way `crontab`/`sudo` are stubbed
+# above rather than conditionally skipped.
+cat > "$FAKE_BIN_DIR/pidof" <<'EOF'
+#!/bin/bash
+# Fake pidof stub (tests/test-migrations-lib.sh, issue #2246 follow-up) -
+# always reports the queried process as running (exit 0), so
+# `pidof systemd >/dev/null 2>&1` succeeds regardless of whether this test
+# runs on a real systemd host or in a systemd-less container.
+exit 0
+EOF
+chmod +x "$FAKE_BIN_DIR/pidof"
+
 export PATH="$FAKE_BIN_DIR:$PATH"
 
 DRY_RUN=false
