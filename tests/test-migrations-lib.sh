@@ -107,6 +107,27 @@ TELEGRAM_BOT_TOKEN=fake-token
 LOBSTER_ADMIN_CHAT_ID=12345
 EOF
 
+# Minimal jobs.json (issue #2246 follow-up): seeds a single enabled job with
+# an absolute `command` path and a `schedule`, matching the exact shape
+# Migration 55 (systemd-timer-from-jobs.json, scripts/lib/migrations.sh
+# ~line 1055) requires to actually run its migration branch rather than be
+# skipped because $WORKSPACE_DIR/scheduled-jobs/jobs.json doesn't exist. That
+# branch is the one embedding the Python subprocess.run(["sudo", "tee", ...])
+# call this suite's sudo stub needs to intercept and prove it caught.
+mkdir -p "$FAKE_WORKSPACE_DIR/scheduled-jobs"
+cat > "$FAKE_WORKSPACE_DIR/scheduled-jobs/jobs.json" <<'EOF'
+{
+  "jobs": {
+    "test-follow-up-job": {
+      "enabled": true,
+      "command": "/usr/local/bin/lobster-test-follow-up-job.sh",
+      "schedule": "*-*-* 04:00:00",
+      "description": "Fake job fixture for migration test (issue #2246 follow-up)"
+    }
+  }
+}
+EOF
+
 # Minimal logging/env contract required by scripts/lib/migrations.sh (see its
 # header docstring) - install.sh's own stubs, reused here 1:1.
 info()    { :; }
@@ -163,16 +184,27 @@ esac
 EOF
 chmod +x "$FAKE_BIN_DIR/crontab"
 
-cat > "$FAKE_BIN_DIR/sudo" <<'EOF'
+FAKE_SUDO_TEE_LOG="$TEST_TMPDIR/fake-sudo-tee-log"
+: > "$FAKE_SUDO_TEE_LOG"
+
+cat > "$FAKE_BIN_DIR/sudo" <<EOF
 #!/bin/bash
 # Fake sudo stub (tests/test-migrations-lib.sh, issue #2246) - swallows all
 # privileged calls (systemctl, usermod, cp, tee, ldconfig, ...) so tests
-# never mutate the real host. `sudo -n true` (passwordless-sudo probe)
-# succeeds; `sudo tee ...` consumes stdin so pipelines don't block.
-if [ "${1:-}" = "-n" ] && [ "${2:-}" = "true" ]; then
+# never mutate the real host. \`sudo -n true\` (passwordless-sudo probe)
+# succeeds; \`sudo tee ...\` consumes stdin so pipelines don't block.
+#
+# For \`tee\`, also record the target path into a log file (issue #2246
+# follow-up) - this is how the test proves the embedded Python migration's
+# subprocess.run(["sudo", "tee", ...]) call (Migration 55,
+# systemd-timer-from-jobs.json) was actually caught by this stub, the same
+# way the crontab stub's state file proves migrations 28/52 were caught.
+TEE_LOG="$FAKE_SUDO_TEE_LOG"
+if [ "\${1:-}" = "-n" ] && [ "\${2:-}" = "true" ]; then
     exit 0
 fi
-if [ "${1:-}" = "tee" ]; then
+if [ "\${1:-}" = "tee" ]; then
+    echo "\${2:-}" >> "\$TEE_LOG"
     cat >/dev/null
     exit 0
 fi
@@ -216,6 +248,8 @@ assert_file_contains "Migration 28 (LOBSTER-LOG-EXPORT) wrote to the fake cronta
     "$FAKE_CRONTAB_STATE" "LOBSTER-LOG-EXPORT"
 assert_file_contains "Migration 52 (LOBSTER-GHOST-DETECTOR) wrote to the fake crontab stub" \
     "$FAKE_CRONTAB_STATE" "LOBSTER-GHOST-DETECTOR"
+assert_file_contains "Migration 55 (systemd-timer-from-jobs.json) exercised the sudo tee stub" \
+    "$FAKE_SUDO_TEE_LOG" "/etc/systemd/system/lobster-test-follow-up-job.timer"
 
 if [ -n "$REAL_CRONTAB_BIN" ]; then
     REAL_CRONTAB_AFTER="$("$REAL_CRONTAB_BIN" -l 2>/dev/null || true)"
