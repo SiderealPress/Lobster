@@ -43,7 +43,15 @@ DEPLOY_MAP = {
 
 
 def verify_signature(payload: bytes, sig_header: str, secret: str) -> bool:
-    """Verify GitHub HMAC-SHA256 webhook signature."""
+    """Verify GitHub HMAC-SHA256 webhook signature.
+
+    SECURITY NOTE: fails open when `secret` is empty — any caller, signed or
+    not, is accepted. This mirrors the existing production behavior (a
+    startup warning is logged, see `load_config`/`__main__` below) rather
+    than changing it here, but it means DEPLOY_WEBHOOK_SECRET being unset
+    silently disables auth on this endpoint. TODO: consider failing closed
+    (rejecting all requests) instead once this is confirmed safe to change.
+    """
     if not secret:
         log.warning("No webhook secret configured — skipping signature check")
         return True
