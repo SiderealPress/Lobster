@@ -38,18 +38,9 @@ fi
 echo "[$(date -Iseconds)] fireflies-sync starting" | tee "$LOG_FILE"
 
 # Run the sync script
-#
-# Invoked by file path (not `-m integrations.fireflies.sync`) to mirror
-# granola-sync.sh. Module-mode invocation requires `integrations` to
-# already be importable from sys.path before the interpreter starts, which
-# depends on the editable install being wired up correctly. Running by
-# file path lets Python add the script's own directory to sys.path, and
-# sync.py's own `sys.path.insert(0, str(_SRC_DIR))` (pointing at src/) then
-# makes the `integrations.*` absolute imports resolve — the same pattern
-# granola/sync.py already relies on.
 cd "$LOBSTER_DIR"
 set +e
-OUTPUT=$(uv run python src/integrations/fireflies/sync.py 2>&1)
+OUTPUT=$(uv run python -m integrations.fireflies.sync 2>&1)
 EXIT_CODE=$?
 set -e
 
