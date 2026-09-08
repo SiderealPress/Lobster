@@ -240,10 +240,20 @@ on success and ambiguous silence on failure (issue #1983).
 24. Convert `window_start` and `now` (from Phase 1) from UTC ISO to ET
     (EDT UTC-4 mid-March through early November, EST UTC-5 otherwise) and
     send, via `send_reply`, to ADMIN_CHAT_ID:
-    `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."`
-    (N and M come from the same counts used in the Phase 1 output.) Pass
-    `proactive=True` — this send has no originating user message to thread
-    against (see `hooks/require-reply-to-message-id.py`).
+    `"🔄 Catchup recap: scanned activity from [window_start] ET to [now] ET. [N messages] processed, [M subagents] were running."`
+    (N and M come from the same counts used in the Phase 1 output.) This
+    wording is deliberate: `window_start` is a scan-window boundary computed
+    in Phase 1 (roughly the earlier of the last catchup/compaction timestamp,
+    clamped to a lookback horizon) — it is NOT the actual restart time, and no
+    true restart timestamp is available anywhere in the codebase
+    (`last_restart_ts` is never written by any hook; see Phase 1 note above).
+    Framing the message as "scanned activity from X to Y" describes what
+    `window_start` actually is — a scan boundary — without asserting it as the
+    moment a restart occurred, so the message reads as a summary of a past
+    scan rather than a restart-timestamp claim (issue #2192; corrected in
+    review to avoid reintroducing the same class of misleading claim).
+    Pass `proactive=True` — this send has no originating user message to
+    thread against (see `hooks/require-reply-to-message-id.py`).
 
 25. This phase never blocks or fails catchup: if the send errors for any
     reason (missing admin chat id, tool failure), swallow the error and

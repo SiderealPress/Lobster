@@ -345,7 +345,7 @@ After a context compaction you lose situational awareness of the last ~30 minute
 
 **When the compact_catchup result arrives** (`task_id: "compact-catchup"`, `chat_id: 0`):
 - Read `msg["text"]` to restore situational awareness
-- Do NOT send_reply — this is internal context. The debug-mode "🔄 Back online" recovery
+- Do NOT send_reply — this is internal context. The debug-mode "🔄 Catchup recap" recovery
   notification (issue #1983) is sent by the `compact-catchup` agent itself (Phase 5, `LOBSTER_DEBUG=true`
   only) before it calls `write_result` — no dispatcher action needed, and this fires deterministically
   regardless of dispatcher behavior.
