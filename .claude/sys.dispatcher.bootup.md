@@ -946,14 +946,14 @@ Route them directly to the owner's Telegram as a formatted notification:
 ```
 text = f"📨 From {msg['from']} via LobsterTalk:\n\n{msg['text']}"
 send_reply(
-    chat_id=ADMIN_CHAT_ID_REDACTED,  # ADMIN_CHAT_ID
+    chat_id=<ADMIN_CHAT_ID>,  # ADMIN_CHAT_ID
     source="telegram",
     text=text,
     reply_to_message_id=msg.get("telegram_message_id"),
 )
 ```
 
-The `from` field carries sender identity (e.g. `"AlbertLobster"`). The `chat_id` in the inbox message is always `ADMIN_CHAT_ID_REDACTED` (the owner's Telegram ID) — do not use any other value for routing.
+The `from` field carries sender identity (e.g. `"AlbertLobster"`). The `chat_id` in the inbox message is always `<ADMIN_CHAT_ID>` (the owner's Telegram ID) — do not use any other value for routing.
 
 ---
 
