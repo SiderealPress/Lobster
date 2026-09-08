@@ -53,9 +53,18 @@ def test_compact_catchup_sends_notification_itself() -> None:
         "compact-catchup.md's Phase 5 must gate the notification on LOBSTER_DEBUG, "
         "matching the existing debug-only behavior."
     )
-    assert "Back online" in content, (
-        "compact-catchup.md must contain the 'Back online' recovery notification text "
-        "as part of Phase 5."
+    assert "Catchup recap: scanned activity from" in content, (
+        "compact-catchup.md must contain the Phase 5 recovery notification template "
+        "text, phrased as a scan-window recap rather than a restart-timestamp claim "
+        "(issue #2192) -- 'window_start' is a scan boundary, not the actual restart "
+        "time, so the template must not assert 'restart detected at [window_start]'."
+    )
+    assert "restart detected at" not in content, (
+        "compact-catchup.md's Phase 5 template must not claim 'restart detected at "
+        "[window_start]' -- window_start is a scan-window boundary computed in Phase "
+        "1, not the true restart time (no such timestamp is available anywhere in "
+        "the codebase), so labeling it as the restart moment reproduces the exact "
+        "misleading-timestamp problem issue #2192 was filed to fix."
     )
     assert "proactive=True" in content, (
         "compact-catchup.md's Phase 5 send_reply must pass proactive=True -- this "
