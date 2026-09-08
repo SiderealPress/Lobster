@@ -240,8 +240,11 @@ on success and ambiguous silence on failure (issue #1983).
 24. Convert `window_start` and `now` (from Phase 1) from UTC ISO to ET
     (EDT UTC-4 mid-March through early November, EST UTC-5 otherwise) and
     send, via `send_reply`, to ADMIN_CHAT_ID:
-    `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."`
-    (N and M come from the same counts used in the Phase 1 output.) Pass
+    `"🔄 Catchup recap: restart detected at [window_start] ET, recovery finished [now] ET. [N messages] processed, [M subagents] were running."`
+    (N and M come from the same counts used in the Phase 1 output.) This
+    wording is deliberate: `window_start` is labeled "restart detected" and
+    `now` is labeled "recovery finished," so the message reads as a summary
+    of a past event rather than something happening live (issue #2192). Pass
     `proactive=True` — this send has no originating user message to thread
     against (see `hooks/require-reply-to-message-id.py`).
 
