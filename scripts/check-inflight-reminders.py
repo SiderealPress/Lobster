@@ -9,6 +9,13 @@ Staleness condition: (now - started_at) > expected_done_in_minutes * STALENESS_M
 
 Entries with completed_at or reminded_at are skipped to prevent duplicate pings.
 The jsonl file is rewritten atomically with reminded_at timestamps on triggered entries.
+
+Because inflight-work.jsonl is append-only, a task's completion is recorded as
+a *separate* "done" line rather than an in-place update of its original
+"running" line (see hooks/require-write-result.py). Before evaluating
+staleness, this script cross-references "done" entries by task_id across the
+whole file (see `collect_done_task_ids`) so an already-completed task's
+"running" line is never flagged as stale, no matter how old it is (issue #2084).
 """
 
 from __future__ import annotations
@@ -58,11 +65,36 @@ def is_stale(entry: dict[str, Any], now: datetime) -> bool:
     return elapsed_minutes > threshold
 
 
-def should_remind(entry: dict[str, Any], now: datetime) -> bool:
+def collect_done_task_ids(entries: list[dict[str, Any]]) -> set[str]:
+    """Return the set of task_ids that have at least one 'done' entry anywhere in entries.
+
+    inflight-work.jsonl is an append-only log: a task's completion is recorded
+    as a *separate* JSONL line (written by hooks/require-write-result.py) rather
+    than as an in-place update of the original "running" line. Any staleness
+    check that only inspects a single entry in isolation will therefore never
+    see that the task actually finished — it has to cross-reference by task_id
+    across the whole file, the same way hooks/on-fresh-start.py's
+    `_compact_inflight_entries` already does.
+
+    Pure function — no side effects, no I/O.
+    """
+    return {
+        entry["task_id"]
+        for entry in entries
+        if "task_id" in entry and (entry.get("status") == "done" or "completed_at" in entry)
+    }
+
+
+def should_remind(
+    entry: dict[str, Any],
+    now: datetime,
+    done_task_ids: frozenset[str] | set[str] = frozenset(),
+) -> bool:
     """Return True if this entry should generate a reminder.
 
     Conditions:
-    - No completed_at (not done)
+    - No completed_at on this entry (not done)
+    - task_id has no 'done' entry anywhere else in the file (not done)
     - No reminded_at (not already reminded)
     - is_stale() is True
 
@@ -71,6 +103,8 @@ def should_remind(entry: dict[str, Any], now: datetime) -> bool:
     if "completed_at" in entry:
         return False
     if entry.get("status") == "done":
+        return False
+    if entry.get("task_id") in done_task_ids:
         return False
     if "reminded_at" in entry:
         return False
@@ -141,13 +175,19 @@ def process_entries(
     For each stale entry, builds a reminder message and marks the entry as
     reminded. All other entries are returned unchanged.
 
+    A task_id with a 'done' entry anywhere in `entries` is never reminded,
+    even if its original 'running' entry has no completed_at/status of its
+    own — see `collect_done_task_ids`.
+
     Pure function — no I/O.
     """
+    done_task_ids = collect_done_task_ids(entries)
+
     messages: list[dict[str, Any]] = []
     updated_entries: list[dict[str, Any]] = []
 
     for entry in entries:
-        if should_remind(entry, now):
+        if should_remind(entry, now, done_task_ids):
             messages.append(build_reminder_message(entry, now))
             updated_entries.append(mark_reminded(entry, now))
         else:
