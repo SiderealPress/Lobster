@@ -103,6 +103,29 @@ class TestInstallPiiScanHook:
         assert result.returncode != 0
         assert "not inside a git repository" in result.stderr
 
+    def test_installs_to_configured_hooks_path_not_dot_git_hooks(self, target_repo):
+        # Regression test for issue #2263: when a target repo configures
+        # core.hooksPath (as SiderealPress/lobster itself does, pointed at
+        # .githooks), git ignores .git/hooks entirely. Installing there
+        # produces a hook file that exists on disk but is never consulted by
+        # git — a silent no-op install. The installer must resolve and write
+        # to the actual configured hooks directory instead.
+        _run_git(["config", "core.hooksPath", ".githooks"], target_repo)
+        (target_repo / ".githooks").mkdir()
+
+        result = _install(target_repo)
+        assert result.returncode == 0, result.stderr
+
+        configured_hook = target_repo / ".githooks" / "pre-push"
+        assert configured_hook.is_file()
+        assert os.access(configured_hook, os.X_OK)
+        assert "installed-by: install-pii-scan-hook.sh" in configured_hook.read_text()
+
+        # Must NOT have also (or instead) landed in the now-irrelevant
+        # .git/hooks/pre-push — that would be the old, silently-broken path.
+        dead_path = target_repo / ".git" / "hooks" / "pre-push"
+        assert not dead_path.is_file()
+
     def test_installed_hook_actually_runs_pii_scan_guard_end_to_end(self, target_repo):
         # Prove the wiring works, not just that files were copied: invoke the
         # installed hook directly with a real pre-push-shaped stdin payload,

@@ -18,6 +18,11 @@
 # configured in ~/lobster-user-config/blocked-commit-emails.txt (gitignored,
 # private). See the "Commit-Author Email Check" section below for details.
 #
+# Also warns (with a confirm-to-proceed prompt) when untracked files sitting
+# directly in the repo root match dump/export/backup/credential-shaped name
+# patterns, regardless of whether they are staged for this commit. See the
+# "Untracked Suspicious Root File Check" section below for details.
+#
 # Bypass: git commit --no-verify
 #===============================================================================
 
@@ -27,10 +32,11 @@ set -uo pipefail
 if [ -t 1 ]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
     BOLD='\033[1m'
     NC='\033[0m'
 else
-    RED='' GREEN='' BOLD='' NC=''
+    RED='' GREEN='' YELLOW='' BOLD='' NC=''
 fi
 
 BLOCKED=0
@@ -394,5 +400,121 @@ check_commit_author_email() {
 }
 
 check_commit_author_email || exit 1
+
+#===============================================================================
+# Untracked Suspicious Root File Check
+#
+# Flags untracked files sitting directly in the repo root that match
+# dump/export/backup/credential-shaped filename patterns — independent of
+# whatever happens to be staged for this particular commit.
+#
+# Motivated by the live_full_dump_now.json incident (2026-09): a 278KB raw
+# Google Slides API dump sat untracked and un-ignored in the repo root for
+# some time, one `git add -A` away from being committed. Every other check in
+# this hook only inspects STAGED files (git diff --cached) — a file nobody
+# has run `git add` on yet is invisible to all of them until the moment it
+# gets swept in, which is exactly the moment it's too late to warn before the
+# commit exists. This check inspects the repo root on every commit,
+# regardless of what's staged, so the warning fires long before that moment.
+#
+# `git ls-files --others --exclude-standard` already excludes anything
+# .gitignore matches — so only the residual-risk category reaches this check:
+# untracked AND not covered by any existing .gitignore rule. That is
+# precisely "a shape nobody has thought to ignore yet," which is what got
+# live_full_dump_now.json past every existing layer.
+#
+# Scope: repo root only (not recursive). Matches the incident, and keeps the
+# check's blast radius small — nested project/build/test directories
+# legitimately accumulate many untracked scratch files that would otherwise
+# produce constant noise.
+#
+# This does not hard-block the commit: the flagged file isn't part of what's
+# being committed, so blocking an unrelated commit over it would be
+# surprising. It warns and (interactively) requires explicit confirmation to
+# proceed — same UX precedent as the commit-author-email check above.
+#
+# Bypass: git commit --no-verify
+#===============================================================================
+
+# Glob patterns (case-insensitive match, see check function below) for
+# filenames that suggest a data dump, export, backup, or credential file —
+# the categories of accidental leak this hook exists to catch. Deliberately
+# broad; false positives here just mean answering one confirmation prompt.
+SUSPICIOUS_ROOT_PATTERNS=(
+    "*dump*"
+    "*export*"
+    "*backup*"
+    "*_bak"
+    "*-bak"
+    "*credential*"
+    "*secret*"
+    "*token*"
+    "*.pem"
+    "*.key"
+    "*snapshot*"
+)
+
+check_untracked_suspicious_root_files() {
+    local -a untracked_root_files=()
+    local f base_lc matched pattern
+
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        # Root-level only: no '/' anywhere in the path
+        case "$f" in
+            */*) continue ;;
+        esac
+        base_lc="$(echo "$f" | tr '[:upper:]' '[:lower:]')"
+        matched=0
+        for pattern in "${SUSPICIOUS_ROOT_PATTERNS[@]}"; do
+            case "$base_lc" in
+                $pattern) matched=1; break ;;
+            esac
+        done
+        [ "$matched" -eq 1 ] && untracked_root_files+=("$f")
+    done < <(git ls-files --others --exclude-standard 2>/dev/null || true)
+
+    [ "${#untracked_root_files[@]}" -eq 0 ] && return 0
+
+    echo ""
+    echo -e "${YELLOW}${BOLD}WARNING: suspicious untracked file(s) found in the repo root:${NC}"
+    for f in "${untracked_root_files[@]}"; do
+        echo -e "         ${BOLD}${f}${NC}"
+    done
+    echo "         These look like data dumps/exports/backups/credentials, which"
+    echo "         belong in \$LOBSTER_WORKSPACE, not the repo. They are not staged"
+    echo "         for THIS commit, but a future 'git add -A' would sweep them in."
+    echo ""
+
+    # Non-interactive (CI/scripted) commits: warn but never block — same
+    # /dev/tty-probe rationale as check_commit_author_email above (git always
+    # connects a hook's own stdin to /dev/null, so `[ -t 0 ]` can't be used
+    # here to detect interactivity).
+    if ! exec 3</dev/tty 2>/dev/null; then
+        echo "No controlling terminal available — proceeding with warning only (not blocking)."
+        echo ""
+        return 0
+    fi
+    exec 3<&-
+
+    read -r -p "Continue committing anyway? [y/N]: " _sus_response </dev/tty
+    _sus_response="${_sus_response:-N}"
+    if [[ "$_sus_response" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+        echo ""
+        echo -e "${GREEN}Confirmed. Proceeding with commit.${NC}"
+        echo ""
+        return 0
+    else
+        echo ""
+        echo -e "${RED}Commit aborted.${NC} Move the file(s) above to \$LOBSTER_WORKSPACE, delete them,"
+        echo "or add a .gitignore rule if they are a legitimate tracked shape."
+        echo ""
+        echo "Emergency bypass: git commit --no-verify"
+        echo ""
+        return 1
+    fi
+}
+
+check_untracked_suspicious_root_files || exit 1
 
 exit 0
