@@ -90,3 +90,23 @@ lobster-shop/kissinger/context/reference.md
 
 # Stray backup files (should never be committed)
 *.bak
+
+# Ad-hoc data dumps / exports / scratch output. These should be written to
+# ~/lobster-workspace/, not the repo — see live_full_dump_now.json incident
+# (2026-09): a raw Google Slides API dump landed in the repo root via an
+# ad-hoc redirected command run with the wrong cwd, sat untracked and
+# un-ignored, and was one `git add -A` away from being committed. Scoped to
+# obvious dump/export/backup naming so legitimate tracked fixtures (e.g.
+# tests/**/*.json, package.json) are unaffected — no tracked file in this
+# repo currently matches any of these patterns (verified via `git ls-files`).
+*dump*.json
+*_dump
+*-dump
+*.dump
+*export*.json
+*_export
+*-export
+*_scratch*
+*-scratch*
+*_snapshot.json
+*-snapshot.json
