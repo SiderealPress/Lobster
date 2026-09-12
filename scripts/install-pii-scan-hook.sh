@@ -60,9 +60,26 @@ TARGET_REPO_ROOT="$(cd "$TARGET_DIR" && git rev-parse --show-toplevel 2>/dev/nul
     exit 1
 }
 
-GIT_HOOKS_DIR="$TARGET_REPO_ROOT/.git/hooks"
+# Resolve the hooks directory git will ACTUALLY consult for this repo, not
+# the default `.git/hooks` path. When `core.hooksPath` is configured (as it
+# is for SiderealPress/lobster itself, pointed at `.githooks`), git ignores
+# `.git/hooks` entirely — installing there would silently produce a hook
+# that never runs. `git rev-parse --git-path hooks` returns the correct,
+# hooksPath-aware directory (relative to the repo root, or absolute if
+# hooksPath was configured as an absolute path); falls back to `.git/hooks`
+# when no override is set, so this is a strict superset of the old behavior.
+GIT_HOOKS_DIR_RAW="$(git -C "$TARGET_REPO_ROOT" rev-parse --git-path hooks 2>/dev/null)" || {
+    echo "ERROR: could not resolve the git hooks directory for $TARGET_REPO_ROOT." >&2
+    exit 1
+}
+case "$GIT_HOOKS_DIR_RAW" in
+    /*) GIT_HOOKS_DIR="$GIT_HOOKS_DIR_RAW" ;;
+    *)  GIT_HOOKS_DIR="$TARGET_REPO_ROOT/$GIT_HOOKS_DIR_RAW" ;;
+esac
+
 if [[ ! -d "$GIT_HOOKS_DIR" ]]; then
-    echo "ERROR: $GIT_HOOKS_DIR does not exist (unusual repo layout — is this a worktree?)." >&2
+    echo "ERROR: $GIT_HOOKS_DIR does not exist (unusual repo layout — is this a worktree," >&2
+    echo "  or a core.hooksPath pointed at a directory that hasn't been created yet?)." >&2
     exit 1
 fi
 
