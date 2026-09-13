@@ -1,0 +1,18 @@
+{
+  "name": "obsidian-vault-mcp",
+  "version": "1.0.0",
+  "description": "Stdio MCP server exposing the same mcp__obsidian__* tool surface as obsidian-mcp, backed by vault-api HTTP calls with a bounded per-call timeout instead of a raw, unbounded stdio child process. See SiderealPress/lobster#2219.",
+  "main": "index.js",
+  "type": "commonjs",
+  "bin": {
+    "obsidian-vault-mcp": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test index.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.23.8"
+  }
+}
