@@ -189,7 +189,7 @@ WFM_ACTIVE_STALE_SECONDS=180   # 3x WAIT_HEARTBEAT_INTERVAL (60s) — absorbs on
 # tighter than the session lifetime a legitimate idle wait is allowed to reach.
 # See compute_wfm_suppression_max_seconds() below.
 WFM_SUPPRESSION_MARGIN_SECONDS=300      # 5 min: fire slightly before the session-age backstop would anyway
-WFM_SUPPRESSION_FALLBACK_SECONDS=21600  # 6h: used when SESSION_AGE_LIMIT_SECONDS=0 (the default as of issue #2196 — session-age check disabled)
+WFM_SUPPRESSION_FALLBACK_SECONDS=70200  # 19.5h: used when SESSION_AGE_LIMIT_SECONDS=0 (the default as of issue #2196 — session-age check disabled). Matches wait_for_messages' 20h timeout with 30m safety margin (issue #2074 false-positive restart fix)
 
 # Pure function: derive the WFM-active suppression cap from the session-age
 # limit. No side effects, no globals read — everything comes in as an argument,
