@@ -889,6 +889,9 @@ restart_services() {
             # without it, review found the restart fires before
             # wait_for_messages ever gets a chance to see this message,
             # defeating its purpose entirely (issue #2275 review).
+            # The subtype is "session-restart" (issue #2279) — P0 like a
+            # compact-reminder, but without making the dispatcher treat a
+            # restart warning as a context compaction.
             if [ "$svc" = "lobster-claude" ] && [ -d "$MESSAGES_DIR/inbox" ]; then
                 local _restart_msg_id="upgrade-claude-restart-$(date -u +%s)"
                 local _restart_status_note="migrations and health check already completed before this step ran."
@@ -900,7 +903,7 @@ restart_services() {
   "id": "${_restart_msg_id}",
   "source": "system",
   "type": "text",
-  "subtype": "compact-reminder",
+  "subtype": "session-restart",
   "chat_id": 0,
   "text": "LOBSTER-CLAUDE RESTART INCOMING (upgrade.sh) — this service is about to restart as the final step of an in-progress upgrade. If you are the session being restarted, this was intentional and expected: ${_restart_status_note} Re-orient after reconnecting: read sys.dispatcher.bootup.md and resume the main loop.",
   "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"

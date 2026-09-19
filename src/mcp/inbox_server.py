@@ -469,6 +469,11 @@ MESSAGES_DB_PATH = Path(
 )
 LOBSTER_TMUX_SESSION = os.environ.get("LOBSTER_TMUX_SESSION", "lobster")
 
+# Subtype tagging "your MCP session is about to be / has been invalidated"
+# warnings (issue #2279).  Kept in sync with the literal written by
+# scripts/restart-mcp.sh; grants P0 via _INBOX_P0_SUBTYPES.
+SESSION_RESTART_SUBTYPE = "session-restart"
+
 # Instance identity for multi-instance deployments (BIS-85).
 # Prefer an explicit observability token; fall back to hostname so reports are
 # always attributed to the Lobster instance that filed them.
@@ -1301,6 +1306,9 @@ def _write_session_lost_reminder() -> None:
             "id": reminder_id,
             "source": "system",
             "type": "compact-reminder",
+            # Priority is derived from `subtype`, not `type` — without this the
+            # warning sinks to P4, the lowest tier (issue #2279).
+            "subtype": SESSION_RESTART_SUBTYPE,
             "chat_id": 0,
             "task_origin": "internal",
             "text": (
@@ -4636,7 +4644,17 @@ def _enqueue_recovery_notification(msg: dict) -> None:
 
 # P0: dispatcher housekeeping — zero-cost, must run before everything else
 _INBOX_P0_TYPES: frozenset[str] = frozenset()
-_INBOX_P0_SUBTYPES: frozenset[str] = frozenset({"compact-reminder", "self_check"})
+_INBOX_P0_SUBTYPES: frozenset[str] = frozenset(
+    {
+        "compact-reminder",
+        "self_check",
+        # MCP restart / session-loss warnings (issue #2279).  Written by
+        # scripts/restart-mcp.sh and _write_session_lost_reminder(); the
+        # dispatcher must see them before anything else it might try to answer
+        # with a session that is about to be (or already has been) invalidated.
+        SESSION_RESTART_SUBTYPE,
+    }
+)
 _INBOX_P0_TEXT_PREFIXES: tuple[str, ...] = ("compact-reminder",)
 
 # P1: real-user messages — latency-sensitive
@@ -4749,6 +4767,11 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
             "compact-reminder",
             "compact_catchup",
             "subagent_notification",
+            # Restart warnings are dispatcher plumbing, not catch-up context.
+            # They were excluded implicitly while they carried the
+            # "compact-reminder" subtype; keep them excluded now that they
+            # carry their own (issue #2279).
+            SESSION_RESTART_SUBTYPE,
         })
 
         all_files = sorted(

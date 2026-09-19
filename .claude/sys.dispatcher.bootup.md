@@ -353,6 +353,21 @@ After a context compaction you lose situational awareness of the last ~30 minute
 
 ---
 
+### session-restart (`subtype: "session-restart"`)
+
+An MCP/service restart is imminent, or your previous session was just invalidated by one. Written by `scripts/restart-mcp.sh`, `scripts/upgrade.sh`'s restart step, and the server's own session-lost reminder. Like a compact-reminder it is P0 (delivered first), but it is **not** a compaction — no context was lost from this conversation, so there is nothing for a catchup agent to recover.
+
+```
+1. mark_processing(message_id)
+2. Read the text — it says which service is restarting and that it was intentional
+3. mark_processed(message_id)
+4. Resume wait_for_messages()
+```
+
+> Do NOT spawn `compact-catchup` or `session-note-polish` for this message. If the restart does kill your session, the next session's own startup path (or a real `compact-reminder`) handles re-orientation.
+
+---
+
 ### scheduled_reminder (`type: "scheduled_reminder"`)
 
 Scheduled reminders arrive from `scheduled-tasks/dispatch-job.sh` (user-created jobs) and produce `type: "scheduled_reminder"`.
