@@ -5854,6 +5854,143 @@ def _apply_filters_and_paginate(
 
 
 _HISTORY_TEXT_DISPLAY_LIMIT = 4000  # Max chars shown per message in get_conversation_history
+_REPLY_QUOTE_DISPLAY_LIMIT = 300    # Max chars of the replied-to message quoted inline
+
+# Issue #2269 — confirmation safety.
+#
+# A short affirmative reply ("Sure", "yes", "do it") only confirms the message
+# it is a Telegram reply_to of.  Conversation history is ordered newest-first,
+# so without the threading metadata the only available pairing signal is
+# adjacency — and adjacency is not confirmation.  These constants drive the
+# classification of "this looks like a bare confirmation" so the renderer can
+# say explicitly when the pairing is unverifiable.
+_CONFIRMATION_MAX_WORDS = 4
+
+_AFFIRMATIVE_TOKENS = frozenset({
+    "yes", "yep", "yeah", "yup", "ya", "sure", "ok", "okay", "k", "y",
+    "affirmative", "approved", "approve", "confirm", "confirmed", "lgtm",
+    "sgtm", "proceed", "go", "ahead", "do", "it", "ship", "send", "merge",
+    "deploy", "run", "please", "fine", "good", "great", "perfect",
+    "absolutely", "definitely", "sounds", "correct", "right",
+    "\U0001f44d", "✅", "\U0001f680",
+})
+
+# Presence of any of these flips a short phrase out of "bare confirmation":
+# "no", "don't", "not yet" must never be read as approval.
+_NEGATION_TOKENS = frozenset({
+    "no", "nope", "not", "dont", "don't", "never", "stop", "cancel",
+    "wait", "hold", "abort", "revert",
+})
+
+_UNTHREADED_CONFIRMATION_WARNING = (
+    "⚠️ UNTHREADED SHORT REPLY — this message carries no Telegram "
+    "reply_to metadata, so it is NOT linked to any earlier message. Do NOT treat "
+    "it as confirmation of a preceding question; adjacency is not confirmation. "
+    "Ask for explicit re-confirmation before any side-effecting action."
+)
+
+
+def _confirmation_tokens(text: str) -> list[str]:
+    """Split *text* into lowercase word tokens for confirmation classification.
+
+    Pure function.  Punctuation is stripped from each token so that "Sure!"
+    and "yes." classify the same as "sure" and "yes".  Emoji are preserved as
+    their own tokens because a bare thumbs-up is itself an affirmative.
+    """
+    if not isinstance(text, str):
+        return []
+    raw = text.strip().split()
+    tokens = [t.strip(".,!?;:\"'()[]").lower() for t in raw]
+    return [t for t in tokens if t]
+
+
+def _is_short_affirmative(text: str) -> bool:
+    """Return True when *text* reads as a bare confirmation and nothing more.
+
+    Pure function.  A phrase qualifies only when it is at most
+    _CONFIRMATION_MAX_WORDS long, contains at least one affirmative token, and
+    contains no negation.  Anything longer carries its own subject matter and
+    is not a context-free "yes" that could be mis-paired.
+    """
+    tokens = _confirmation_tokens(text)
+    if not tokens or len(tokens) > _CONFIRMATION_MAX_WORDS:
+        return False
+    if any(t in _NEGATION_TOKENS for t in tokens):
+        return False
+    return any(t in _AFFIRMATIVE_TOKENS for t in tokens)
+
+
+def _coerce_reply_to(value: Any) -> dict | None:
+    """Normalise a stored reply_to value into a dict, or None if unusable.
+
+    Pure function.  The two read paths disagree on representation: the
+    filesystem scan yields the decoded dict written by the bot, while the SQL
+    path (db/reader.py) returns the raw `reply_to` TEXT column as a JSON
+    string.  Callers must not have to care which path produced the row.
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if isinstance(decoded, dict):
+            return decoded
+    return None
+
+
+def _format_reply_to_block(msg: dict) -> str:
+    """Render the threading provenance for one message, or '' when there is none.
+
+    Pure function.  Three outcomes:
+      - The message is a Telegram reply: name the message_id it replied to and
+        quote that message's text, so the pairing can be verified rather than
+        inferred.
+      - The message is a bare confirmation with no threading metadata: emit
+        _UNTHREADED_CONFIRMATION_WARNING, because adjacency alone must not be
+        read as approval (issue #2269).
+      - Anything else: emit nothing, leaving ordinary history unchanged.
+    """
+    reply_to = _coerce_reply_to(msg.get("reply_to"))
+    reply_msg_id = msg.get("reply_to_message_id")
+
+    if reply_to:
+        target_id = (
+            reply_to.get("reply_to_message_id")
+            or reply_to.get("message_id")
+            or reply_msg_id
+            or "?"
+        )
+        from_user = (
+            reply_to.get("reply_to_from_user")
+            or reply_to.get("username")
+            or reply_to.get("user_name")
+        )
+        quoted = reply_to.get("reply_to_text") or reply_to.get("text") or ""
+        from_label = f" from @{from_user}" if from_user else ""
+        block = f"↩️ In reply to msg_id=`{target_id}`{from_label}:\n"
+        if quoted:
+            was_truncated = len(quoted) > _REPLY_QUOTE_DISPLAY_LIMIT
+            snippet = quoted[:_REPLY_QUOTE_DISPLAY_LIMIT] + (
+                " [truncated]" if was_truncated else ""
+            )
+            block += f">> {snippet}\n"
+        else:
+            block += ">> (no text content)\n"
+        return block
+
+    if reply_msg_id:
+        # Threaded, but the quoted blob is absent (outbound sends record only
+        # the id they threaded to).  The id alone is still verifiable.
+        return f"↩️ In reply to msg_id=`{reply_msg_id}`\n"
+
+    if msg.get("_direction") == "received" and _is_short_affirmative(
+        msg.get("text", "")
+    ):
+        return f"{_UNTHREADED_CONFIRMATION_WARNING}\n"
+
+    return ""
 
 
 def _format_history_output(
@@ -5887,17 +6024,26 @@ def _format_history_output(
 
         was_truncated = len(text) > _HISTORY_TEXT_DISPLAY_LIMIT
         truncated = text[:_HISTORY_TEXT_DISPLAY_LIMIT] + (" [truncated]" if was_truncated else "")
+
+        # Issue #2269: threading provenance must travel with the message text.
+        # Without it the reader can only pair messages by adjacency.
+        tg_id = msg.get("telegram_message_id")
+        id_label = f" | msg_id: `{tg_id}`" if tg_id else ""
+        reply_block = _format_reply_to_block(msg)
+
         if msg["_direction"] == "received":
             user = msg.get("user_name", msg.get("username", "Unknown"))
             output += "---\n"
-            output += f"{direction_icon} **{direction_label}** [{source}] from **{user}** | Chat: `{chat_id}`\n"
+            output += f"{direction_icon} **{direction_label}** [{source}] from **{user}** | Chat: `{chat_id}`{id_label}\n"
             output += f"Time: {ts_display}\n\n"
-            output += f"> {truncated}\n\n"
         else:
             output += "---\n"
-            output += f"{direction_icon} **{direction_label}** [{source}] to chat `{chat_id}`\n"
+            output += f"{direction_icon} **{direction_label}** [{source}] to chat `{chat_id}`{id_label}\n"
             output += f"Time: {ts_display}\n\n"
-            output += f"> {truncated}\n\n"
+
+        if reply_block:
+            output += reply_block
+        output += f"> {truncated}\n\n"
 
     if total_count > offset + limit:
         next_offset = offset + limit
@@ -6049,11 +6195,22 @@ async def handle_get_message_by_telegram_id(args: dict) -> list[TextContent]:
                     output += f"Time: {ts_display}\n\n"
                     output += f"**Text:**\n> {text}\n"
 
-                    reply_to = msg.get("reply_to")
+                    # Issue #2269: the DB returns reply_to as a raw JSON string,
+                    # so the old isinstance(dict) guard silently rendered an
+                    # empty quote for every DB-path lookup.
+                    reply_to = _coerce_reply_to(msg.get("reply_to"))
                     if reply_to:
-                        reply_text = reply_to.get("reply_to_text") or reply_to.get("text", "") if isinstance(reply_to, dict) else ""
-                        reply_from = reply_to.get("reply_to_from_user") or reply_to.get("from_user", "") if isinstance(reply_to, dict) else ""
-                        reply_msg_id = msg.get("reply_to_message_id", "")
+                        reply_text = reply_to.get("reply_to_text") or reply_to.get("text", "")
+                        reply_from = (
+                            reply_to.get("reply_to_from_user")
+                            or reply_to.get("from_user", "")
+                            or reply_to.get("username", "")
+                        )
+                        reply_msg_id = (
+                            msg.get("reply_to_message_id")
+                            or reply_to.get("message_id")
+                            or ""
+                        )
                         output += f"\n**Reply to** (TG ID `{reply_msg_id}`, from {reply_from}):\n> {str(reply_text)[:300]}{'...' if len(str(reply_text)) > 300 else ''}\n"
 
                     for field in ("image_file", "file_path", "audio_file"):
