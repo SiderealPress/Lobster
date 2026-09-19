@@ -292,6 +292,26 @@ class TestUpgradePreservesContext:
         assert "jobs.json" in content, "upgrade.sh should back up jobs.json"
         assert "tasks.json" in content, "upgrade.sh should back up tasks.json"
 
+    def test_upgrade_sh_restarts_services_last(self, lobster_dir: Path):
+        """restart_services() restarts lobster-claude directly (issue #2275):
+        if upgrade.sh is running inside that same session (e.g. a subagent
+        doing "run lobster update"), the restart kills the script's own
+        process. It must therefore be the last step in main() so every step
+        whose result matters (migrations, health check) has already
+        completed and logged before the kill can happen."""
+        content = (lobster_dir / "scripts" / "upgrade.sh").read_text()
+        main_start = content.index("\nmain() {")
+        main_body = content[main_start:content.index("\nmain \"$@\"", main_start)]
+
+        restart_pos = main_body.index("restart_services")
+        migrations_pos = main_body.index("run_migrations")
+        health_check_pos = main_body.index("health_check")
+
+        assert migrations_pos < restart_pos, \
+            "run_migrations must run before restart_services (issue #2275)"
+        assert health_check_pos < restart_pos, \
+            "health_check must run before restart_services (issue #2275)"
+
 
 @pytest.mark.integration
 class TestMCPServerDirectoryInit:
