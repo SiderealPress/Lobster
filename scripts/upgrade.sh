@@ -899,7 +899,8 @@ restart_services() {
 {
   "id": "${_restart_msg_id}",
   "source": "system",
-  "type": "compact-reminder",
+  "type": "text",
+  "subtype": "compact-reminder",
   "chat_id": 0,
   "text": "LOBSTER-CLAUDE RESTART INCOMING (upgrade.sh) — this service is about to restart as the final step of an in-progress upgrade. If you are the session being restarted, this was intentional and expected: ${_restart_status_note} Re-orient after reconnecting: read sys.dispatcher.bootup.md and resume the main loop.",
   "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
