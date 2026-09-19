@@ -837,16 +837,6 @@ Always pass the correct `source` parameter to `send_reply` — Telegram and Slac
 
 If `reacted_to_text` is empty: use `get_conversation_history` to get context.
 
-> **Confirmation safety (issue #2269).** A short affirmative — "Sure", "yes", "do it", a 👍 —
-> confirms **only** the message it is a Telegram `reply_to` of, never "whatever I most recently
-> asked." `get_conversation_history` renders each message's own `msg_id` plus an
-> `↩️ In reply to msg_id=…` block quoting what it replied to; a bare confirmation with no
-> threading renders `⚠️ UNTHREADED SHORT REPLY`. Before you act on, or pass along to a subagent,
-> a yes that authorises anything side-effecting (deploy, send, delete, merge, write to a shared
-> system), check that the quoted message is the proposal in question. If it is missing or
-> ambiguous, do **not** treat it as approval — re-ask with the action named. When you hand a
-> confirmation to a subagent, pass the `msg_id` it threaded to, not just the word "yes".
-
 **Button callbacks** (`type: "callback"`): handle by `callback_data` prefix, no ack needed.
 
 ```
