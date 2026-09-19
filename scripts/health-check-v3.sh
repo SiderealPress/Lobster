@@ -189,7 +189,29 @@ WFM_ACTIVE_STALE_SECONDS=180   # 3x WAIT_HEARTBEAT_INTERVAL (60s) — absorbs on
 # tighter than the session lifetime a legitimate idle wait is allowed to reach.
 # See compute_wfm_suppression_max_seconds() below.
 WFM_SUPPRESSION_MARGIN_SECONDS=300      # 5 min: fire slightly before the session-age backstop would anyway
-WFM_SUPPRESSION_FALLBACK_SECONDS=70200  # 19.5h: used when SESSION_AGE_LIMIT_SECONDS=0 (the default as of issue #2196 — session-age check disabled). Matches wait_for_messages' 20h timeout with 30m safety margin (issue #2074 false-positive restart fix)
+
+# --- The no-backstop fallback (SESSION_AGE_LIMIT_SECONDS=0) ---
+# When the session-age check is disabled (the default as of issue #2196) there is
+# NO unconditional restart event for this cap to "fire slightly before". So the
+# fallback must do the opposite of the derived branch above: instead of sitting
+# just *inside* a backstop, it must sit comfortably *outside* the longest idle
+# wait a healthy dispatcher can legitimately produce.
+#
+# That longest legitimate wait is wait_for_messages()'s own default timeout
+# (see `"default": 72000` for the timeout arg in src/mcp/inbox_server.py). On a
+# fully quiet night with zero messages the dispatcher blocks for the whole
+# 72000s and its heartbeat stays stale that entire time — entirely healthy. Any
+# fallback BELOW 72000s therefore guarantees exactly one false-positive restart
+# per maximal quiet stretch (the bug fixed here: 70200s fired 30 min early).
+#
+# Per docs/engineering-lessons-learned.md ("Independent Timing Constants That
+# Encode a Shared, Unstated Assumption"), the fallback is DERIVED from the
+# wait_for_messages timeout it depends on rather than hand-copied as a literal,
+# so the relationship is visible at the point of definition and the margin is
+# added in the direction the branch actually needs.
+WFM_DEFAULT_WAIT_TIMEOUT_SECONDS=72000     # 20h: wait_for_messages() default timeout (src/mcp/inbox_server.py)
+WFM_FALLBACK_SAFETY_MARGIN_SECONDS=1800    # 30 min ABOVE the timeout — must exceed it, not undercut it
+WFM_SUPPRESSION_FALLBACK_SECONDS=$(( WFM_DEFAULT_WAIT_TIMEOUT_SECONDS + WFM_FALLBACK_SAFETY_MARGIN_SECONDS ))  # 73800 (20.5h)
 
 # Pure function: derive the WFM-active suppression cap from the session-age
 # limit. No side effects, no globals read — everything comes in as an argument,
