@@ -45,6 +45,20 @@
 #       just no longer tighter than the session lifetime a legitimate idle wait
 #       is allowed to reach.
 #
+# Cross-file relationship tests (no-backstop fallback vs. wait_for_messages):
+#   21. Both real constants are parseable out of their source files (fails loudly
+#       if a refactor breaks the grep, rather than comparing empty strings).
+#   22. WFM_SUPPRESSION_FALLBACK_SECONDS (health-check-v3.sh) must EXCEED
+#       wait_for_messages()'s real default timeout (src/mcp/inbox_server.py).
+#       With the session-age check disabled there is no backstop restart for the
+#       cap to fire just before, so a fallback at or below that timeout means a
+#       maximal quiet night trips one false-positive restart. 70200 < 72000 was
+#       exactly that bug.
+#   23. Behavioral: heartbeat stale for the FULL wait_for_messages timeout with a
+#       fresh WFM-active file → GREEN under the real fallback.
+#   24. Behavioral: heartbeat stale beyond the real fallback → still RED (the
+#       widened fallback must not disable frozen-dispatcher detection).
+#
 # Usage: bash tests/test-health-check-dispatcher-heartbeat.sh
 #===============================================================================
 
@@ -374,6 +388,87 @@ remove_wfm_active
 assert_exit "$rc" 2
 
 # Restore the mechanism-test cap for anything appended after this point.
+WFM_SUPPRESSION_MAX_SECONDS=2700
+
+# ===================================================================
+# Cross-file relationship tests: the no-backstop fallback vs. the REAL
+# wait_for_messages() default timeout.
+#
+# Tests 16-18 exercise compute_wfm_suppression_max_seconds() against
+# hardcoded literals only, so they cannot catch the fallback constant
+# drifting below the timeout it actually depends on. These read both real
+# values out of their source files and assert the relationship.
+# ===================================================================
+
+echo ""
+echo "--- Cross-file: fallback cap must exceed wait_for_messages' real timeout ---"
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INBOX_SERVER="$REPO_ROOT/src/mcp/inbox_server.py"
+
+# Real wait_for_messages() default timeout, read from its tool schema.
+REAL_WFM_TIMEOUT=$(grep -A1 'Maximum seconds to wait' "$INBOX_SERVER" \
+    | grep -oE '"default":[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)
+
+# Real fallback constant, evaluated from health-check-v3.sh (it is derived,
+# so the literal cannot simply be grepped).
+REAL_FALLBACK=$(bash -c '
+    eval "$(grep -E "^WFM_DEFAULT_WAIT_TIMEOUT_SECONDS=|^WFM_FALLBACK_SAFETY_MARGIN_SECONDS=|^WFM_SUPPRESSION_FALLBACK_SECONDS=" "$1")"
+    echo "$WFM_SUPPRESSION_FALLBACK_SECONDS"
+' _ "$HEALTH_SCRIPT")
+
+# -------------------------------------------------------------------
+# Test 21: both values are readable. If either grep stops matching (a
+# refactor moved or renamed things), fail loudly rather than silently
+# comparing empty strings and "passing".
+# -------------------------------------------------------------------
+begin_test "Both real constants are parseable (wfm_timeout=${REAL_WFM_TIMEOUT:-UNPARSEABLE}, fallback=${REAL_FALLBACK:-UNPARSEABLE})"
+if [[ "$REAL_WFM_TIMEOUT" =~ ^[0-9]+$ && "$REAL_FALLBACK" =~ ^[0-9]+$ ]]; then
+    pass
+else
+    fail "could not parse constants (timeout='$REAL_WFM_TIMEOUT', fallback='$REAL_FALLBACK') — a refactor likely moved or renamed them"
+fi
+
+# -------------------------------------------------------------------
+# Test 22: the fallback must EXCEED the longest legitimate idle wait.
+# With the session-age check disabled there is no backstop restart to fire
+# just before, so a fallback at or below wait_for_messages' timeout means a
+# full quiet night (heartbeat legitimately stale for the entire timeout)
+# trips one false-positive restart. 70200 < 72000 was exactly that bug.
+# -------------------------------------------------------------------
+begin_test "Fallback cap (${REAL_FALLBACK}s) > wait_for_messages timeout (${REAL_WFM_TIMEOUT}s)"
+if [[ "$REAL_WFM_TIMEOUT" =~ ^[0-9]+$ && "$REAL_FALLBACK" =~ ^[0-9]+$ && $REAL_FALLBACK -gt $REAL_WFM_TIMEOUT ]]; then
+    pass
+else
+    fail "fallback=$REAL_FALLBACK must be strictly greater than wait_for_messages timeout=$REAL_WFM_TIMEOUT"
+fi
+
+# -------------------------------------------------------------------
+# Test 23: behavioral end-to-end — a heartbeat stale for the FULL
+# wait_for_messages timeout (a maximal quiet night, zero messages) with a
+# fresh WFM-active file must be GREEN under the real fallback cap. This is
+# the production scenario the fallback exists for.
+# -------------------------------------------------------------------
+begin_test "Stale hb for full wfm timeout (${REAL_WFM_TIMEOUT}s) + WFM-active fresh → GREEN under real fallback"
+# session_age_limit=0 → the fallback branch, which is what production uses.
+WFM_SUPPRESSION_MAX_SECONDS=$(compute_wfm_suppression_max_seconds 0 300 "$REAL_FALLBACK")
+write_wfm_active 5
+run_check_with_wfm "$REAL_WFM_TIMEOUT" && rc=$? || rc=$?
+remove_wfm_active
+assert_exit "$rc" 0
+
+# -------------------------------------------------------------------
+# Test 24: a truly frozen dispatcher — heartbeat stale beyond the real
+# fallback cap — still fires RED. The widened fallback must not disable
+# frozen-dispatcher detection outright.
+# -------------------------------------------------------------------
+begin_test "Stale hb beyond real fallback (${REAL_FALLBACK}s) + WFM-active fresh → RED"
+WFM_SUPPRESSION_MAX_SECONDS="$REAL_FALLBACK"
+write_wfm_active 5
+run_check_with_wfm $(( REAL_FALLBACK + 100 )) && rc=$? || rc=$?
+remove_wfm_active
+assert_exit "$rc" 2
+
 WFM_SUPPRESSION_MAX_SECONDS=2700
 
 # -------------------------------------------------------------------
