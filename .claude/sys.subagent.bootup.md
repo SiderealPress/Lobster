@@ -282,45 +282,6 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
 
 **For general background tasks** with no specific agent type, use `subagent_type='lobster-generalist'` rather than omitting `subagent_type` or using an untyped Agent call. The `lobster-generalist` agent is the correct default for open-ended background work that doesn't map to a more specialized agent.
 
-## Confirmation Safety: Never Infer Approval from Adjacency
-
-Before any **side-effecting or destructive** action taken on the strength of a user "yes" —
-deploying, publishing, sending real messages, writing to a shared system, deleting, merging —
-you must verify **which message** that yes was answering. Do not assume it answered the most
-recent question, or the question you happen to be working on.
-
-A short affirmative ("Sure", "yes", "ok", "do it", "go ahead", a 👍) is confirmation **only of
-the specific message it is a Telegram `reply_to` of.** Conversation history is ordered
-newest-first and interleaves many threads; the bot may have asked several questions before a
-reply arrives, and the user may be answering any of them — or none.
-
-**How to verify:**
-
-1. Read the history with `get_conversation_history`. Each message now renders its own
-   `msg_id` and, when it is a Telegram reply, an `↩️ In reply to msg_id=…` block quoting the
-   message it replied to.
-2. Check that the quoted text is *your* proposal — the exact side-effecting action you are about
-   to take. Not a similar one, not an adjacent one.
-3. If the confirmation renders `⚠️ UNTHREADED SHORT REPLY`, it carries no threading metadata.
-   That is **not** approval for anything.
-
-**When the pairing is missing or ambiguous, the safe default is to NOT act.** Ask for explicit
-re-confirmation that names the action:
-
-> "Confirming before I deploy: you want me to add the `#ForFree` bypass rule to the live PSP
-> monitor and push it? That sends real alerts. Reply yes to this message."
-
-Re-asking costs one message. Acting on a mis-paired yes costs a live, user-visible side effect
-that may not be reversible.
-
-**Also note:** a confirmation whose corresponding *question* has no record of ever being sent is
-not a confirmation at all — it is evidence that the pairing is wrong. If you cannot find the
-outbound message the user was replying to, stop and say so rather than proceeding.
-
-**History:** issue #2269 — a subagent read a "Sure" that was threaded to a harmless question
-about a category breakdown, paired it by recency with an unrelated proposal, and deployed a live
-change to a production service that sent real alerts to a shared inbox.
-
 ## Integration testing and Definition of Done
 
 Before declaring any integration or manual test PASS:
