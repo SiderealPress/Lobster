@@ -27,12 +27,17 @@ import src.mcp.inbox_server  # noqa: F401
 # Priority constants — mirror the spec so tests break if the implementation drifts
 P0_COMPACT_REMINDER = 0
 P0_SELF_CHECK = 0
+P0_SESSION_RESTART = 0
 P1_TEXT = 1
 P1_VOICE = 1
 P2_SUBAGENT_RESULT = 2
 P3_AGENT_FAILED = 3
 P4_SCHEDULED_REMINDER = 4
 P4_DEFAULT = 4
+
+# Subtype marking "your MCP session is about to die / just died" warnings (issue #2279).
+# Mirrors the literal written by scripts/restart-mcp.sh and _write_session_lost_reminder().
+SESSION_RESTART_SUBTYPE = "session-restart"
 
 _BASE_TS = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -112,6 +117,10 @@ class TestInboxPriorityFunction:
 
     def test_self_check_subtype_is_p0(self):
         assert self._priority({"type": "text", "subtype": "self_check"}) == P0_SELF_CHECK
+
+    def test_session_restart_subtype_is_p0(self):
+        """Restart / session-loss warnings are guaranteed-first (issue #2279)."""
+        assert self._priority({"type": "compact-reminder", "subtype": SESSION_RESTART_SUBTYPE}) == P0_SESSION_RESTART
 
     def test_compact_reminder_text_prefix_is_p0(self):
         assert self._priority({"type": "text", "text": "compact-reminder extra"}) == P0_COMPACT_REMINDER
@@ -252,3 +261,86 @@ class TestCheckInboxPriorityOrdering:
         )
         text = result[0].text
         assert "proc_msg" in text, "since_ts path must still read from processed/ dir"
+
+
+# ---------------------------------------------------------------------------
+# The real producers of session-restart warnings must land in P0 (issue #2279)
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).parent.parent.parent.parent
+_RESTART_SCRIPT = _REPO_ROOT / "scripts" / "restart-mcp.sh"
+
+
+class TestSessionRestartProducersAreP0:
+    """The messages restart-mcp.sh and the server actually write must be P0.
+
+    Regression guard for issue #2279: both producers set only `type`, and
+    `_INBOX_P0_TYPES` is empty, so before the fix both warnings fell through
+    to P4 — the lowest tier — despite being "guaranteed first" by intent.
+    """
+
+    def test_restart_mcp_script_writes_p0_message(self, tmp_path):
+        """Running restart-mcp.sh enqueues a message that _inbox_priority ranks P0."""
+        import os
+        import subprocess
+
+        from src.mcp.inbox_server import _inbox_priority
+
+        messages_dir = tmp_path / "restart-messages"
+        (messages_dir / "inbox").mkdir(parents=True, exist_ok=True)
+
+        # Stub out `sudo` so the script never touches the real systemd unit.
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        fake_sudo = fake_bin / "sudo"
+        fake_sudo.write_text("#!/usr/bin/env bash\nexit 0\n")
+        fake_sudo.chmod(0o755)
+
+        env = {
+            **os.environ,
+            "LOBSTER_MESSAGES": str(messages_dir),
+            "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+        }
+        proc = subprocess.run(
+            ["bash", str(_RESTART_SCRIPT), "--no-wait"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert proc.returncode == 0, f"restart-mcp.sh failed: {proc.stderr}"
+
+        written = list((messages_dir / "inbox").glob("mcp-restart-*.json"))
+        assert len(written) == 1, f"Expected one restart warning, got {written}"
+        msg = json.loads(written[0].read_text())
+
+        assert msg["subtype"] == SESSION_RESTART_SUBTYPE
+        assert _inbox_priority(msg) == P0_SESSION_RESTART, (
+            "The restart warning must be delivered first, not last"
+        )
+
+    def test_restart_mcp_script_leaves_no_tmp_file(self, tmp_path):
+        """The script's atomic write must not leave a .tmp file behind."""
+        import os
+        import subprocess
+
+        messages_dir = tmp_path / "restart-messages"
+        (messages_dir / "inbox").mkdir(parents=True, exist_ok=True)
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        (fake_bin / "sudo").write_text("#!/usr/bin/env bash\nexit 0\n")
+        (fake_bin / "sudo").chmod(0o755)
+
+        subprocess.run(
+            ["bash", str(_RESTART_SCRIPT), "--no-wait"],
+            env={
+                **os.environ,
+                "LOBSTER_MESSAGES": str(messages_dir),
+                "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+            },
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+        assert list((messages_dir / "inbox").glob("*.tmp")) == []
