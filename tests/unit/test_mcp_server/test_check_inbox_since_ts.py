@@ -138,6 +138,15 @@ class TestCheckInboxSinceTs:
         text = result[0].text
         assert "c1" not in text or "No messages" in text
 
+    def test_since_ts_excludes_session_restart_subtype(self, dirs):
+        """Restart warnings are plumbing, not catch-up context (issue #2279)."""
+        msg = _make_msg("sr1", _AFTER, subtype="session-restart", source="system")
+        (dirs["processed"] / "sr1.json").write_text(json.dumps(msg))
+
+        result = self._run(dirs, {"since_ts": "2026-01-01T12:00:00Z"})
+        text = result[0].text
+        assert "sr1" not in text or "No messages" in text
+
     def test_since_ts_excludes_self_check_subtype(self, dirs):
         """self_check messages are excluded even if within the time window."""
         msg = _make_msg("sc1", _AFTER, subtype="self_check", source="system")
