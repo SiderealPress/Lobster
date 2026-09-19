@@ -876,6 +876,26 @@ restart_services() {
 
     for svc in "${services[@]}"; do
         if systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+            # issue #2275: restarting lobster-claude can kill this very script
+            # if it's running inside that session (e.g. a subagent doing "run
+            # lobster update"). Write a heads-up to the inbox first, same
+            # pattern as scripts/restart-mcp.sh, so a dispatcher that survives
+            # long enough to see it before the kill knows the restart was
+            # intentional and how to re-orient.
+            if [ "$svc" = "lobster-claude" ] && [ -d "$MESSAGES_DIR/inbox" ]; then
+                local _restart_msg_id="upgrade-claude-restart-$(date -u +%s)"
+                cat > "$MESSAGES_DIR/inbox/${_restart_msg_id}.json.tmp" <<EOF
+{
+  "id": "${_restart_msg_id}",
+  "source": "system",
+  "type": "compact-reminder",
+  "chat_id": 0,
+  "text": "LOBSTER-CLAUDE RESTART INCOMING (upgrade.sh) — this service is about to restart as the final step of an in-progress upgrade. If you are the session being restarted, this was intentional and expected: migrations and health check already completed successfully before this step ran. Re-orient after reconnecting: read sys.dispatcher.bootup.md and resume the main loop.",
+  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+}
+EOF
+                mv "$MESSAGES_DIR/inbox/${_restart_msg_id}.json.tmp" "$MESSAGES_DIR/inbox/${_restart_msg_id}.json" 2>/dev/null || true
+            fi
             substep "Restarting $svc..."
             if sudo systemctl restart "$svc" 2>/dev/null; then
                 sleep 2
@@ -1140,9 +1160,15 @@ main() {
     setup_syncthing           # 5. Syncthing (optional/prompted)
     install_playwright        # 6. Playwright/Chromium
     update_systemd_services   # 8. Systemd updates
-    restart_services          # 7. Service restarts
     run_migrations            # 9. Migrations
     health_check              # 10. Health check
+    restart_services          # 7. Service restarts — MUST be last (issue #2275):
+                               # restarting lobster-claude can kill this very
+                               # script if it is running inside that session
+                               # (e.g. a subagent invoked "run lobster update").
+                               # Every step whose result matters (migrations,
+                               # health check) must already be complete and
+                               # logged before this runs.
 
     local elapsed=$(( $(date +%s) - start_time ))
 
