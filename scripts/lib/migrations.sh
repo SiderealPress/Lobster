@@ -2581,14 +2581,21 @@ M88_PYEOF
             # filesystem atomic rename (mktemp's default /tmp may be a
             # different filesystem, making mv a non-atomic copy+unlink that can
             # leave a truncated ~/.claude.json if interrupted).
+            #
+            # Note on concurrency: a live Claude Code process owns this file and
+            # rewrites it periodically, so this read-modify-write can in
+            # principle lose the race (either side's copy wins). That is
+            # acceptable here — the write is a one-time backfill, and if CC's
+            # copy wins the key is simply still missing and the next
+            # install/upgrade run reapplies it (this migration is idempotent).
             local _m101_tmp
             _m101_tmp=$(mktemp "${_m101_claude_json}.tmp.XXXXXX") || _m101_tmp=""
             if [ -n "$_m101_tmp" ] \
                 && jq --argjson t "$_m101_timeout_ms" '.mcpServers."lobster-inbox".timeout = $t' \
                     "$_m101_claude_json" > "$_m101_tmp" 2>/dev/null \
-                && [ -s "$_m101_tmp" ]; then
-                chmod --reference="$_m101_claude_json" "$_m101_tmp" 2>/dev/null || true
-                mv "$_m101_tmp" "$_m101_claude_json"
+                && [ -s "$_m101_tmp" ] \
+                && { chmod --reference="$_m101_claude_json" "$_m101_tmp" 2>/dev/null || true; \
+                     mv "$_m101_tmp" "$_m101_claude_json"; }; then
                 substep "Migration 101: set lobster-inbox MCP idle timeout (${_m101_timeout_ms}ms) in $_m101_claude_json (issue #2208)"
                 migrated=$((migrated + 1))
             else
