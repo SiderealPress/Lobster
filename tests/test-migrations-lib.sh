@@ -12,6 +12,12 @@
 #      so a reimage-via-restore silently skipped every config.env migration.
 #   3. upgrade.sh still sources the shared lib and calls run_migrations().
 #
+# Also verifies (issue #2208): Migration 101 sets
+# mcpServers."lobster-inbox".timeout in ~/.claude.json when missing, is a
+# byte-for-byte no-op once set, and refuses to fabricate a server entry when
+# lobster-inbox is not registered at all. Run against $TEST_TMPDIR fixtures via
+# the CLAUDE_JSON override so the real ~/.claude.json is never written.
+#
 # Also verifies (issue #2246): run_migrations() runs all ~99 migrations
 # unconditionally, and several of them shell out directly to the real
 # `crontab` binary and to `sudo` (systemctl, usermod, tee) - commands that
@@ -72,6 +78,15 @@ assert_file_contains() {
     fi
 }
 
+assert_equal() {
+    local label="$1" expected="$2" actual="$3"
+    if [ "$expected" = "$actual" ]; then
+        pass "$label"
+    else
+        fail "$label" "expected: $expected / got: $actual"
+    fi
+}
+
 assert_count() {
     local label="$1" expected="$2" actual="$3"
     if [ "$expected" = "$actual" ]; then
@@ -97,6 +112,16 @@ FAKE_MESSAGES_DIR="$TEST_TMPDIR/messages"
 FAKE_CONFIG_DIR="$TEST_TMPDIR/lobster-config"
 FAKE_USER_CONFIG_DIR="$TEST_TMPDIR/lobster-user-config"
 FAKE_CLAUDE_SETTINGS="$TEST_TMPDIR/settings.json"
+# Migration 101 (issue #2208) patches ~/.claude.json, which the fake
+# $LOBSTER_DIR/$WORKSPACE_DIR sandbox does NOT cover — same class of
+# non-sandboxed host resource as `crontab`/`sudo` above. migrations.sh honours
+# an optional CLAUDE_JSON override for exactly this reason, so point it at
+# fixtures under $TEST_TMPDIR and leave the real ~/.claude.json untouched.
+FAKE_CLAUDE_JSON="$TEST_TMPDIR/claude.json"
+FAKE_CLAUDE_JSON_NO_SERVER="$TEST_TMPDIR/claude-no-server.json"
+# The value the spec (issue #2208 / install.sh) requires: ~20.8h in ms,
+# comfortably above wait_for_messages' own 20h max.
+MCP_IDLE_TIMEOUT_MS=75000000
 FAKE_VENV_DIR="$TEST_TMPDIR/lobster/.venv"
 mkdir -p "$FAKE_LOBSTER_DIR" "$FAKE_WORKSPACE_DIR" "$FAKE_MESSAGES_DIR/inbox" "$FAKE_CONFIG_DIR" "$FAKE_USER_CONFIG_DIR" "$FAKE_VENV_DIR/bin"
 
@@ -245,7 +270,42 @@ LOBSTER_CONFIG_DIR="$FAKE_CONFIG_DIR"
 USER_CONFIG_DIR="$FAKE_USER_CONFIG_DIR"
 CONFIG_FILE="$FAKE_CONFIG_DIR/config.env"
 CLAUDE_SETTINGS="$FAKE_CLAUDE_SETTINGS"
+CLAUDE_JSON="$FAKE_CLAUDE_JSON"
 VENV_DIR="$FAKE_VENV_DIR"
+
+# Fixture: a host whose lobster-inbox MCP server is registered but has no
+# per-server "timeout" key — i.e. installed before the install.sh patch landed
+# and only ever updated via upgrade.sh (the exact gap issue #2208 describes).
+cat > "$FAKE_CLAUDE_JSON" <<'EOF'
+{
+  "hasCompletedOnboarding": true,
+  "mcpServers": {
+    "lobster-inbox": {
+      "type": "http",
+      "url": "http://localhost:8766/mcp"
+    }
+  }
+}
+EOF
+
+# Fixture: lobster-inbox is not registered at all. Setting a nested .timeout
+# here would fabricate a server entry with no transport/url, so the migration
+# must leave this file alone.
+cat > "$FAKE_CLAUDE_JSON_NO_SERVER" <<'EOF'
+{
+  "hasCompletedOnboarding": true,
+  "mcpServers": {}
+}
+EOF
+
+# Migrations 96 and 100 gate on `[ -z "${VAR:-}" ]` after sourcing the fake
+# config.env, so they skip whenever the *ambient* environment already exports
+# those keys — which is exactly the case when this suite is run from inside a
+# live Lobster/Claude Code session that has them set. That made the two
+# config.env assertions below fail for environmental reasons unrelated to the
+# migrations. Clear them so the suite tests the migration, not the shell it
+# happens to be launched from.
+unset CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT CLAUDE_CODE_FORK_SUBAGENT
 
 # shellcheck source=../scripts/lib/migrations.sh
 source "$LIB"
@@ -264,6 +324,62 @@ assert_file_contains "Migration 100 applies CLAUDE_CODE_FORK_SUBAGENT=0 to confi
 run_migrations
 occurrences=$(grep -c "^CLAUDE_CODE_FORK_SUBAGENT=" "$CONFIG_FILE")
 assert_count "Migration 100 is idempotent (running twice does not duplicate the key)" "1" "$occurrences"
+
+#===============================================================================
+# Group 1c: Migration 101 — lobster-inbox MCP idle timeout in ~/.claude.json
+# (issue #2208)
+#===============================================================================
+echo ""
+echo "-- Migration 101 sets the lobster-inbox MCP idle timeout --"
+
+if ! command -v jq >/dev/null 2>&1; then
+    pass "Migration 101 assertions (skipped: jq not available on this host)"
+else
+    # Branch 1: timeout absent -> migration sets it. (run_migrations already ran
+    # above against $FAKE_CLAUDE_JSON.)
+    assert_equal "Migration 101 sets lobster-inbox timeout when absent" \
+        "$MCP_IDLE_TIMEOUT_MS" \
+        "$(jq -r '.mcpServers."lobster-inbox".timeout' "$FAKE_CLAUDE_JSON")"
+
+    assert_equal "Migration 101 preserves the existing server config (url untouched)" \
+        "http://localhost:8766/mcp" \
+        "$(jq -r '.mcpServers."lobster-inbox".url' "$FAKE_CLAUDE_JSON")"
+
+    # Branch 2: already set -> no-op. Byte-compare the whole file across another
+    # run: nothing is rewritten, reordered, or reformatted.
+    cp "$FAKE_CLAUDE_JSON" "$TEST_TMPDIR/claude.json.before-noop"
+    run_migrations
+    if cmp -s "$TEST_TMPDIR/claude.json.before-noop" "$FAKE_CLAUDE_JSON"; then
+        pass "Migration 101 is a byte-for-byte no-op when the timeout is already set"
+    else
+        fail "Migration 101 is a byte-for-byte no-op when the timeout is already set" \
+            "~/.claude.json was rewritten on a run where nothing needed changing"
+    fi
+
+    # Branch 3: lobster-inbox not registered -> leave the file alone rather than
+    # fabricating a transport-less server entry.
+    CLAUDE_JSON="$FAKE_CLAUDE_JSON_NO_SERVER"
+    cp "$FAKE_CLAUDE_JSON_NO_SERVER" "$TEST_TMPDIR/claude-no-server.json.before"
+    run_migrations
+    assert_equal "Migration 101 does not fabricate a lobster-inbox entry when unregistered" \
+        "null" \
+        "$(jq -r '.mcpServers."lobster-inbox" // "null"' "$FAKE_CLAUDE_JSON_NO_SERVER")"
+    if cmp -s "$TEST_TMPDIR/claude-no-server.json.before" "$FAKE_CLAUDE_JSON_NO_SERVER"; then
+        pass "Migration 101 leaves an unregistered-server ~/.claude.json byte-for-byte unchanged"
+    else
+        fail "Migration 101 leaves an unregistered-server ~/.claude.json byte-for-byte unchanged" \
+            "file was modified even though lobster-inbox is not registered"
+    fi
+    CLAUDE_JSON="$FAKE_CLAUDE_JSON"
+
+    # Host isolation note: we deliberately do NOT checksum the real
+    # ~/.claude.json before/after. On a live Lobster host the running Claude
+    # Code process rewrites that file continuously (session/project state), so
+    # such an assertion is inherently flaky and says nothing about this
+    # migration. Isolation is instead established structurally: the migration
+    # reads its target from $CLAUDE_JSON, which is pointed at $TEST_TMPDIR
+    # fixtures above, and branches 1-3 prove the writes landed there.
+fi
 
 #===============================================================================
 # Group 1b: crontab/sudo isolation (issue #2246)

@@ -29,6 +29,12 @@
 #   VENV_DIR             — full path to the Python venv ($LOBSTER_DIR/.venv)
 #   DRY_RUN              — "true"/"false"; when true, run_migrations logs and returns without changes
 #
+# Optional variables:
+#   CLAUDE_JSON          — full path to Claude Code's own ~/.claude.json
+#                          (defaults to $HOME/.claude.json). Overridable so
+#                          tests can exercise migrations that patch it without
+#                          mutating the real host file.
+#
 # Required functions (caller-specific logging/output, matching the convention
 # used by scripts/lib/template.sh):
 #   info(), success(), warn(), error(), step(), substep()
@@ -2537,6 +2543,58 @@ M88_PYEOF
             migrated=$((migrated + 1))
         else
             substep "Migration 100: CLAUDE_CODE_FORK_SUBAGENT already set — skipping"
+        fi
+    fi
+
+    # Migration 101: Set the lobster-inbox per-server MCP idle timeout in
+    # ~/.claude.json (issue #2208). Migration 96 above only covers the
+    # config.env layer (CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0, the global
+    # client-side watchdog). There is a second, independent layer: the
+    # per-server "timeout" key under .mcpServers."lobster-inbox" in
+    # ~/.claude.json. `claude mcp add` has no --timeout flag, so a host that
+    # never got this key has its long-blocking wait_for_messages calls aborted
+    # client-side after CC's ~300s default and immediately retried, burning a
+    # request every cycle. install.sh has applied the same jq patch since
+    # PR #2213, but only on the fresh-install path — hosts that predate it and
+    # only ever run upgrade.sh never catch up. This migration closes that gap.
+    #
+    # 75000000ms (~20.8h) comfortably exceeds wait_for_messages' own max
+    # timeout (72000s / 20h). Keep this value in sync with install.sh's
+    # equivalent patch (search install.sh for 75000000).
+    local _m101_timeout_ms=75000000
+    local _m101_claude_json="${CLAUDE_JSON:-$HOME/.claude.json}"
+    if [ -f "$_m101_claude_json" ] && command -v jq >/dev/null 2>&1; then
+        local _m101_current _m101_registered
+        _m101_current=$(jq -r '.mcpServers."lobster-inbox".timeout // "unset"' "$_m101_claude_json" 2>/dev/null || echo "unset")
+        _m101_registered=$(jq -r 'if (.mcpServers."lobster-inbox" | type) == "object" then "yes" else "no" end' "$_m101_claude_json" 2>/dev/null || echo "no")
+
+        if [ "$_m101_current" = "$_m101_timeout_ms" ]; then
+            substep "Migration 101: lobster-inbox MCP idle timeout already set — skipping"
+        elif [ "$_m101_registered" != "yes" ]; then
+            # Writing .mcpServers."lobster-inbox".timeout here would fabricate a
+            # server entry with no transport/url, which CC would then try to
+            # start. Leave the file alone; install.sh sets the timeout right
+            # after it registers the server.
+            warn "Migration 101: lobster-inbox MCP server not registered in $_m101_claude_json — skipping timeout patch"
+        else
+            # Write the temp file next to the target so the mv is a same-
+            # filesystem atomic rename (mktemp's default /tmp may be a
+            # different filesystem, making mv a non-atomic copy+unlink that can
+            # leave a truncated ~/.claude.json if interrupted).
+            local _m101_tmp
+            _m101_tmp=$(mktemp "${_m101_claude_json}.tmp.XXXXXX") || _m101_tmp=""
+            if [ -n "$_m101_tmp" ] \
+                && jq --argjson t "$_m101_timeout_ms" '.mcpServers."lobster-inbox".timeout = $t' \
+                    "$_m101_claude_json" > "$_m101_tmp" 2>/dev/null \
+                && [ -s "$_m101_tmp" ]; then
+                chmod --reference="$_m101_claude_json" "$_m101_tmp" 2>/dev/null || true
+                mv "$_m101_tmp" "$_m101_claude_json"
+                substep "Migration 101: set lobster-inbox MCP idle timeout (${_m101_timeout_ms}ms) in $_m101_claude_json (issue #2208)"
+                migrated=$((migrated + 1))
+            else
+                [ -n "$_m101_tmp" ] && rm -f "$_m101_tmp"
+                warn "Migration 101: could not set lobster-inbox MCP idle timeout in $_m101_claude_json"
+            fi
         fi
     fi
 
