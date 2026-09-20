@@ -2588,22 +2588,40 @@ M88_PYEOF
             # different filesystem, making mv a non-atomic copy+unlink that can
             # leave a truncated ~/.claude.json if interrupted).
             #
-            # Note on concurrency: a live Claude Code process owns this file and
-            # rewrites it periodically, so this read-modify-write can in
-            # principle lose the race (either side's copy wins). That is
-            # acceptable here — the write is a one-time backfill, and if CC's
-            # copy wins the key is simply still missing and the next
+            # Concurrency: a live Claude Code process owns this file and
+            # rewrites it (session/project state) on its own schedule, and
+            # upgrade.sh deliberately restarts services last (issue #2275) so
+            # the dispatcher is typically alive during this window. The race
+            # cuts both ways, and the dangerous direction is *this* write
+            # winning: everything CC persisted between our read and our rename
+            # would be silently discarded. So compare-and-swap — re-check the
+            # file immediately before the rename and bail if it moved under us.
+            # Losing the race is harmless: the key stays missing and the next
             # install/upgrade run reapplies it (this migration is idempotent).
-            local _m101_tmp
+            # This narrows the window to the microseconds between the check and
+            # the rename rather than eliminating it; there is no file-locking
+            # protocol shared with Claude Code to do better.
+            local _m101_tmp _m101_sum_before=""
+            if command -v md5sum >/dev/null 2>&1; then
+                _m101_sum_before="$(md5sum < "$_m101_claude_json" 2>/dev/null || true)"
+            fi
             _m101_tmp=$(mktemp "${_m101_claude_json}.tmp.XXXXXX") || _m101_tmp=""
             if [ -n "$_m101_tmp" ] \
                 && jq --argjson t "$_m101_timeout_ms" '.mcpServers."lobster-inbox".timeout = $t' \
                     "$_m101_claude_json" > "$_m101_tmp" 2>/dev/null \
-                && [ -s "$_m101_tmp" ] \
-                && { chmod --reference="$_m101_claude_json" "$_m101_tmp" 2>/dev/null || true; \
-                     mv "$_m101_tmp" "$_m101_claude_json"; }; then
-                substep "Migration 101: set lobster-inbox MCP idle timeout (${_m101_timeout_ms}ms) in $_m101_claude_json (issue #2208)"
-                migrated=$((migrated + 1))
+                && [ -s "$_m101_tmp" ]; then
+                if [ -n "$_m101_sum_before" ] \
+                    && [ "$_m101_sum_before" != "$(md5sum < "$_m101_claude_json" 2>/dev/null || true)" ]; then
+                    rm -f "$_m101_tmp"
+                    warn "Migration 101: $_m101_claude_json changed while patching (concurrent Claude Code write) — skipping rather than clobbering it; rerun upgrade to apply"
+                elif { chmod --reference="$_m101_claude_json" "$_m101_tmp" 2>/dev/null || true; \
+                       mv "$_m101_tmp" "$_m101_claude_json"; }; then
+                    substep "Migration 101: set lobster-inbox MCP idle timeout (${_m101_timeout_ms}ms) in $_m101_claude_json (issue #2208)"
+                    migrated=$((migrated + 1))
+                else
+                    rm -f "$_m101_tmp"
+                    warn "Migration 101: could not set lobster-inbox MCP idle timeout in $_m101_claude_json"
+                fi
             else
                 [ -n "$_m101_tmp" ] && rm -f "$_m101_tmp"
                 warn "Migration 101: could not set lobster-inbox MCP idle timeout in $_m101_claude_json"
