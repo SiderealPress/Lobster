@@ -111,6 +111,41 @@ class TestIsStale:
 
 
 # ---------------------------------------------------------------------------
+# collect_done_task_ids
+# ---------------------------------------------------------------------------
+
+
+class TestCollectDoneTaskIds:
+    def test_empty_entries_yields_empty_set(self) -> None:
+        assert ir.collect_done_task_ids([]) == set()
+
+    def test_entry_with_status_done_is_collected(self) -> None:
+        entries = [{"task_id": "t1", "status": "done"}]
+        assert ir.collect_done_task_ids(entries) == {"t1"}
+
+    def test_entry_with_completed_at_is_collected_even_without_status_done(self) -> None:
+        entries = [{"task_id": "t1", "completed_at": "2026-04-19T10:00:00Z"}]
+        assert ir.collect_done_task_ids(entries) == {"t1"}
+
+    def test_running_only_entries_are_not_collected(self) -> None:
+        entries = [{"task_id": "t1", "status": "running"}]
+        assert ir.collect_done_task_ids(entries) == set()
+
+    def test_done_entry_correlates_across_separate_lines_for_same_task_id(self) -> None:
+        # The append-only-log shape from issue #2084: a "running" line and a
+        # separate "done" line for the same task_id.
+        entries = [
+            {"task_id": "deploy-check-654", "status": "running", "started_at": "2026-04-20T21:51:40Z"},
+            {"task_id": "deploy-check-654", "status": "done", "completed_at": "2026-04-20T21:52:28Z"},
+        ]
+        assert ir.collect_done_task_ids(entries) == {"deploy-check-654"}
+
+    def test_entries_without_task_id_are_ignored(self) -> None:
+        entries = [{"status": "done"}]
+        assert ir.collect_done_task_ids(entries) == set()
+
+
+# ---------------------------------------------------------------------------
 # should_remind
 # ---------------------------------------------------------------------------
 
@@ -135,6 +170,18 @@ class TestShouldRemind:
     def test_entry_with_completed_at_skipped_even_if_no_reminded_at(self) -> None:
         entry = _entry("t5", started_minutes_ago=100, expected_done_in_minutes=10, completed=True)
         assert ir.should_remind(entry, NOW) is False
+
+    def test_entry_whose_task_id_is_in_done_task_ids_is_skipped(self) -> None:
+        # This is the append-only-log scenario (issue #2084): the "running" entry
+        # itself carries no completed_at/status=="done" of its own -- the task's
+        # completion is a *separate* line elsewhere in the file. done_task_ids
+        # is how that cross-reference gets passed in.
+        entry = _entry("t6", started_minutes_ago=100, expected_done_in_minutes=10)
+        assert ir.should_remind(entry, NOW, done_task_ids={"t6"}) is False
+
+    def test_entry_not_in_done_task_ids_still_evaluated_normally(self) -> None:
+        entry = _entry("t7", started_minutes_ago=21, expected_done_in_minutes=10)
+        assert ir.should_remind(entry, NOW, done_task_ids={"some-other-task"}) is True
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +333,26 @@ class TestProcessEntries:
         bad_entry = {"task_id": "bad-1", "description": "no timestamp", "chat_id": 0}
         messages, _ = ir.process_entries([bad_entry], NOW)
         assert messages == []
+
+    def test_running_entry_with_separate_done_line_generates_no_reminder(self) -> None:
+        # Regression test for issue #2084: a task that finished long ago via a
+        # separate "done" line (append-only log) must never be flagged as
+        # stale just because its original "running" line individually looks
+        # old and carries no completed_at/reminded_at of its own.
+        running = _entry("deploy-check-654", started_minutes_ago=60 * 24 * 30, expected_done_in_minutes=10)
+        done = {"task_id": "deploy-check-654", "status": "done", "completed_at": "2026-04-20T21:52:28Z"}
+        messages, updated = ir.process_entries([running, done], NOW)
+        assert messages == []
+        # The running entry is left untouched -- no spurious reminded_at stamp.
+        running_updated = next(e for e in updated if e["task_id"] == "deploy-check-654" and e.get("status") == "running")
+        assert "reminded_at" not in running_updated
+
+    def test_done_correlation_does_not_suppress_genuinely_stale_unrelated_task(self) -> None:
+        stale = _entry("still-running-1", started_minutes_ago=25, expected_done_in_minutes=10)
+        done = {"task_id": "other-task", "status": "done", "completed_at": "2026-04-20T21:52:28Z"}
+        messages, _ = ir.process_entries([stale, done], NOW)
+        assert len(messages) == 1
+        assert messages[0]["task_id"] == "still-running-1"
 
 
 # ---------------------------------------------------------------------------

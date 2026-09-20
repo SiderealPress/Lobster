@@ -29,7 +29,14 @@ if [[ "${1:-}" == "--no-wait" ]]; then
     NO_WAIT=true
 fi
 
-# Write the warning message to the inbox
+# Write the warning message to the inbox. NOTE: "subtype" (not "type") is
+# what grants this P0/guaranteed-first priority in inbox_server.py's
+# _inbox_priority() — _INBOX_P0_TYPES is empty, only _INBOX_P0_SUBTYPES is
+# checked. This was missing here until issue #2275's review caught the same
+# bug freshly copied into scripts/upgrade.sh; fixed in both at once.
+# The subtype is "session-restart", not "compact-reminder" (issue #2279): a
+# restart warning is not a compaction, and tagging it as one made the
+# dispatcher run its compaction handler (catchup subagents) for no reason.
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 MSG_ID="mcp-restart-$(date -u +%s)"
 MSG_FILE="${INBOX_DIR}/${MSG_ID}.json"
@@ -40,7 +47,8 @@ cat > "${MSG_FILE}.tmp" <<EOF
 {
   "id": "${MSG_ID}",
   "source": "system",
-  "type": "compact-reminder",
+  "type": "text",
+  "subtype": "session-restart",
   "chat_id": 0,
   "text": "MCP RESTART INCOMING — The lobster-mcp service is about to restart. Your MCP session will be invalidated. Re-orient after reconnecting: read sys.dispatcher.bootup.md and resume the main loop.",
   "timestamp": "${TIMESTAMP}"

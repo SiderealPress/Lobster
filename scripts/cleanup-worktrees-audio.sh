@@ -13,6 +13,16 @@
 #      AUDIO_RETENTION_DAYS. These files are transcribed and stored as text;
 #      the originals are only retained for debugging and can be safely deleted.
 #
+#   3. Stale synthetic test fixtures in ~/messages/failed/ — the unrecognized-
+#      source quarantine guard in src/mcp/inbox_server.py moves any inbox
+#      message with source="test" to failed/ as `test_<epoch>.json` (issue
+#      #2209). These accumulate indefinitely and drown out genuine quarantined
+#      messages in the same directory. Only files matching the exact
+#      `test_<digits>.json` pattern are removed, and only once older than
+#      FAILED_TEST_FIXTURE_RETENTION_DAYS — every other file in failed/
+#      (including real quarantined messages) is left untouched regardless of
+#      age or name.
+#
 # Usage:
 #   ~/lobster/scripts/cleanup-worktrees-audio.sh
 #
@@ -28,6 +38,9 @@ PROJECTS_DIR="${LOBSTER_PROJECTS:-$WORKSPACE_DIR/projects}"
 # AUDIO_DIR can be overridden directly (useful for tests); falls back to LOBSTER_MESSAGES/audio.
 AUDIO_DIR="${CLEANUP_AUDIO_DIR:-${LOBSTER_MESSAGES:-$HOME/messages}/audio}"
 AUDIO_RETENTION_DAYS="${CLEANUP_AUDIO_RETENTION_DAYS:-7}"
+# FAILED_DIR can be overridden directly (useful for tests); falls back to LOBSTER_MESSAGES/failed.
+FAILED_DIR="${CLEANUP_FAILED_DIR:-${LOBSTER_MESSAGES:-$HOME/messages}/failed}"
+FAILED_TEST_FIXTURE_RETENTION_DAYS="${CLEANUP_FAILED_TEST_FIXTURE_RETENTION_DAYS:-1}"
 
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
@@ -115,6 +128,40 @@ prune_audio() {
 }
 
 #-------------------------------------------------------------------------------
+# 3. Prune stale synthetic test fixtures from ~/messages/failed/ (issue #2209)
+#    Only files matching the exact `test_<digits>.json` name are candidates;
+#    every other filename in failed/ (including real quarantined messages) is
+#    never touched by this step, regardless of age.
+#-------------------------------------------------------------------------------
+
+prune_failed_test_fixtures() {
+    if [ ! -d "$FAILED_DIR" ]; then
+        info "Failed-messages directory $FAILED_DIR does not exist — skipping"
+        return 0
+    fi
+
+    info "Removing test_<digits>.json fixtures older than ${FAILED_TEST_FIXTURE_RETENTION_DAYS} day(s) from $FAILED_DIR"
+
+    local deleted=0
+    while IFS= read -r -d '' filepath; do
+        rm -f "$filepath"
+        info "Deleted stale test fixture: $filepath"
+        deleted=$(( deleted + 1 ))
+    done < <(find "$FAILED_DIR" \
+        -maxdepth 1 \
+        -type f \
+        -regextype posix-extended -regex '.*/test_[0-9]+\.json' \
+        -mtime "+${FAILED_TEST_FIXTURE_RETENTION_DAYS}" \
+        -print0 2>/dev/null)
+
+    if [ "$deleted" -eq 0 ]; then
+        info "No stale test_<digits>.json fixtures found in $FAILED_DIR"
+    else
+        info "Deleted $deleted stale test fixture(s) from $FAILED_DIR"
+    fi
+}
+
+#-------------------------------------------------------------------------------
 # Main
 #-------------------------------------------------------------------------------
 
@@ -135,6 +182,7 @@ main() {
     prune_worktrees
     prune_pr_worktrees
     prune_audio
+    prune_failed_test_fixtures
     log "=== cleanup-worktrees-audio.sh complete ==="
 }
 

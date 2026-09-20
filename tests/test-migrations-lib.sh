@@ -258,6 +258,13 @@ run_migrations
 occurrences=$(grep -c "^CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=" "$CONFIG_FILE")
 assert_count "Migration 96 is idempotent (running twice does not duplicate the key)" "1" "$occurrences"
 
+assert_file_contains "Migration 100 applies CLAUDE_CODE_FORK_SUBAGENT=0 to config.env" \
+    "$CONFIG_FILE" "CLAUDE_CODE_FORK_SUBAGENT=0"
+
+run_migrations
+occurrences=$(grep -c "^CLAUDE_CODE_FORK_SUBAGENT=" "$CONFIG_FILE")
+assert_count "Migration 100 is idempotent (running twice does not duplicate the key)" "1" "$occurrences"
+
 #===============================================================================
 # Group 1b: crontab/sudo isolation (issue #2246)
 #===============================================================================

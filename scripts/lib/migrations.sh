@@ -2512,6 +2512,34 @@ M88_PYEOF
         warn "Migration 99: uv not found at $UV_BIN — skipping cron entry repair"
     fi
 
+    # Migration 100: Add CLAUDE_CODE_FORK_SUBAGENT=0 to config.env if missing
+    # (issue #2270). Claude Code's `subagent_type: "fork"` mode has been
+    # on-by-default since CC 2.1.232 — a fork inherits the dispatcher's full
+    # system prompt, including the always-on "never exit, call
+    # wait_for_messages in a loop" instructions. Observed 2026-09-18: a fork
+    # spawned for a bounded research task never terminated and instead ran a
+    # full parallel copy of the dispatcher main loop for ~40 minutes,
+    # independently calling send_reply and spawning its own subagents —
+    # producing confusing, uncoordinated duplicate replies to the user. This
+    # does not affect normal background subagents (lobster-generalist etc.),
+    # which start with a fresh prompt and have no path back into the
+    # dispatcher loop.
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" 2>/dev/null || true
+        if [ -z "${CLAUDE_CODE_FORK_SUBAGENT:-}" ]; then
+            echo "" >> "$CONFIG_FILE"
+            echo "# Disable Claude Code's fork subagent mode (issue #2270). A fork" >> "$CONFIG_FILE"
+            echo "# inherits the dispatcher's full always-on system prompt and can" >> "$CONFIG_FILE"
+            echo "# re-enter the main loop instead of terminating after its task." >> "$CONFIG_FILE"
+            echo "CLAUDE_CODE_FORK_SUBAGENT=0" >> "$CONFIG_FILE"
+            substep "Migration 100: added CLAUDE_CODE_FORK_SUBAGENT=0 to config.env (issue #2270)"
+            migrated=$((migrated + 1))
+        else
+            substep "Migration 100: CLAUDE_CODE_FORK_SUBAGENT already set — skipping"
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else

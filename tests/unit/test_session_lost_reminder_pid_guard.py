@@ -16,9 +16,11 @@ from inbox_server.py source) and verify the full _write_session_lost_reminder()
 flow via the inbox_server module (using a minimal patched environment).
 """
 
+import importlib
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -33,8 +35,10 @@ import pytest
 _SRC_MCP_DIR = Path(__file__).parents[2] / "src" / "mcp"
 _SERVER_PATH = _SRC_MCP_DIR / "inbox_server.py"
 
-# Named constant matching the spec.
+# Named constants matching the spec.
 DISPATCHER_PID_FILENAME = "dispatcher.pid"
+SESSION_RESTART_SUBTYPE = "session-restart"
+P0_GUARANTEED_FIRST = 0
 
 
 def _extract_is_dispatcher_alive(dispatcher_pid_path: Path):
@@ -201,6 +205,32 @@ class TestSessionLostReminderPidGuard:
         reminder = json.loads(reminder_files[0].read_text())
         assert reminder["type"] == "compact-reminder"
         assert "SESSION LOST" in reminder["text"]
+
+    def test_reminder_carries_session_restart_subtype(self, tmp_path):
+        """The reminder must be tagged so the priority queue ranks it P0 (issue #2279).
+
+        Priority is derived from `subtype`, not `type` — without this tag the
+        session-loss warning sinks to P4, the lowest tier.
+        """
+        inbox_dir = tmp_path / "inbox"
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        pid_file = tmp_path / DISPATCHER_PID_FILENAME
+        state_file = tmp_path / "lobster-state.json"
+        state_file.write_text(json.dumps({"mode": "active"}))
+
+        _call_write_session_lost_reminder(
+            inbox_dir=inbox_dir,
+            dispatcher_pid_path=pid_file,
+            state_file=state_file,
+        )
+
+        reminder_files = list(inbox_dir.glob("session-lost-*.json"))
+        assert len(reminder_files) == 1
+        reminder = json.loads(reminder_files[0].read_text())
+        assert reminder["subtype"] == SESSION_RESTART_SUBTYPE
+
+        mod = sys.modules.get("inbox_server") or importlib.import_module("inbox_server")
+        assert mod._inbox_priority(reminder) == P0_GUARANTEED_FIRST
 
     def test_suppresses_reminder_when_dispatcher_alive(self, tmp_path):
         """Live dispatcher PID → mid-session reconnect → reminder suppressed."""

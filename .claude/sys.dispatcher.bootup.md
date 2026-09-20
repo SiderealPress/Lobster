@@ -345,11 +345,26 @@ After a context compaction you lose situational awareness of the last ~30 minute
 
 **When the compact_catchup result arrives** (`task_id: "compact-catchup"`, `chat_id: 0`):
 - Read `msg["text"]` to restore situational awareness
-- Do NOT send_reply — this is internal context. The debug-mode "🔄 Back online" recovery
+- Do NOT send_reply — this is internal context. The debug-mode "🔄 Catchup recap" recovery
   notification (issue #1983) is sent by the `compact-catchup` agent itself (Phase 5, `LOBSTER_DEBUG=true`
   only) before it calls `write_result` — no dispatcher action needed, and this fires deterministically
   regardless of dispatcher behavior.
 - `mark_processed`
+
+---
+
+### session-restart (`subtype: "session-restart"`)
+
+An MCP/service restart is imminent, or your previous session was just invalidated by one. Written by `scripts/restart-mcp.sh`, `scripts/upgrade.sh`'s restart step, and the server's own session-lost reminder. Like a compact-reminder it is P0 (delivered first), but it is **not** a compaction — no context was lost from this conversation, so there is nothing for a catchup agent to recover.
+
+```
+1. mark_processing(message_id)
+2. Read the text — it says which service is restarting and that it was intentional
+3. mark_processed(message_id)
+4. Resume wait_for_messages()
+```
+
+> Do NOT spawn `compact-catchup` or `session-note-polish` for this message. If the restart does kill your session, the next session's own startup path (or a real `compact-reminder`) handles re-orientation.
 
 ---
 
@@ -837,6 +852,16 @@ Always pass the correct `source` parameter to `send_reply` — Telegram and Slac
 
 If `reacted_to_text` is empty: use `get_conversation_history` to get context.
 
+> **Confirmation safety (issue #2269).** A short affirmative — "Sure", "yes", "do it", a 👍 —
+> confirms **only** the message it is a Telegram `reply_to` of, never "whatever I most recently
+> asked." `get_conversation_history` renders each message's own `msg_id` plus an
+> `↩️ In reply to msg_id=…` block quoting what it replied to; a bare confirmation with no
+> threading renders `⚠️ UNTHREADED SHORT REPLY`. Before you act on, or pass along to a subagent,
+> a yes that authorises anything side-effecting (deploy, send, delete, merge, write to a shared
+> system), check that the quoted message is the proposal in question. If it is missing or
+> ambiguous, do **not** treat it as approval — re-ask with the action named. When you hand a
+> confirmation to a subagent, pass the `msg_id` it threaded to, not just the word "yes".
+
 **Button callbacks** (`type: "callback"`): handle by `callback_data` prefix, no ack needed.
 
 ```
@@ -946,14 +971,14 @@ Route them directly to the owner's Telegram as a formatted notification:
 ```
 text = f"📨 From {msg['from']} via LobsterTalk:\n\n{msg['text']}"
 send_reply(
-    chat_id=ADMIN_CHAT_ID_REDACTED,  # ADMIN_CHAT_ID
+    chat_id=<ADMIN_CHAT_ID>,  # ADMIN_CHAT_ID
     source="telegram",
     text=text,
     reply_to_message_id=msg.get("telegram_message_id"),
 )
 ```
 
-The `from` field carries sender identity (e.g. `"AlbertLobster"`). The `chat_id` in the inbox message is always `ADMIN_CHAT_ID_REDACTED` (the owner's Telegram ID) — do not use any other value for routing.
+The `from` field carries sender identity (e.g. `"AlbertLobster"`). The `chat_id` in the inbox message is always `<ADMIN_CHAT_ID>` (the owner's Telegram ID) — do not use any other value for routing.
 
 ---
 

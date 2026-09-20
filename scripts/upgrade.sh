@@ -876,6 +876,42 @@ restart_services() {
 
     for svc in "${services[@]}"; do
         if systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+            # issue #2275: restarting lobster-claude can kill this very script
+            # if it's running inside that session (e.g. a subagent doing "run
+            # lobster update"). Write a heads-up to the inbox first, same
+            # pattern as scripts/restart-mcp.sh, so a dispatcher that survives
+            # long enough to see it before the kill knows the restart was
+            # intentional and how to re-orient.
+            # NOTE: this duplicates scripts/restart-mcp.sh's write-tmp-then-mv
+            # inbox-notification pattern rather than reusing it (that script
+            # is hardcoded to the lobster-mcp service name). Keep the two in
+            # sync by hand — in particular, the sleep below is load-bearing:
+            # without it, review found the restart fires before
+            # wait_for_messages ever gets a chance to see this message,
+            # defeating its purpose entirely (issue #2275 review).
+            # The subtype is "session-restart" (issue #2279) — P0 like a
+            # compact-reminder, but without making the dispatcher treat a
+            # restart warning as a context compaction.
+            if [ "$svc" = "lobster-claude" ] && [ -d "$MESSAGES_DIR/inbox" ]; then
+                local _restart_msg_id="upgrade-claude-restart-$(date -u +%s)"
+                local _restart_status_note="migrations and health check already completed before this step ran."
+                if [ "$ERRORS" -gt 0 ] || [ "$WARNINGS" -gt 0 ]; then
+                    _restart_status_note="migrations and health check ran before this step, but logged ${ERRORS} error(s) and ${WARNINGS} warning(s) — check the upgrade log."
+                fi
+                cat > "$MESSAGES_DIR/inbox/${_restart_msg_id}.json.tmp" <<EOF
+{
+  "id": "${_restart_msg_id}",
+  "source": "system",
+  "type": "text",
+  "subtype": "session-restart",
+  "chat_id": 0,
+  "text": "LOBSTER-CLAUDE RESTART INCOMING (upgrade.sh) — this service is about to restart as the final step of an in-progress upgrade. If you are the session being restarted, this was intentional and expected: ${_restart_status_note} Re-orient after reconnecting: read sys.dispatcher.bootup.md and resume the main loop.",
+  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+}
+EOF
+                mv "$MESSAGES_DIR/inbox/${_restart_msg_id}.json.tmp" "$MESSAGES_DIR/inbox/${_restart_msg_id}.json" 2>/dev/null || true
+                sleep 2
+            fi
             substep "Restarting $svc..."
             if sudo systemctl restart "$svc" 2>/dev/null; then
                 sleep 2
@@ -1140,9 +1176,15 @@ main() {
     setup_syncthing           # 5. Syncthing (optional/prompted)
     install_playwright        # 6. Playwright/Chromium
     update_systemd_services   # 8. Systemd updates
-    restart_services          # 7. Service restarts
     run_migrations            # 9. Migrations
     health_check              # 10. Health check
+    restart_services          # 7. Service restarts — MUST be last (issue #2275):
+                               # restarting lobster-claude can kill this very
+                               # script if it is running inside that session
+                               # (e.g. a subagent invoked "run lobster update").
+                               # Every step whose result matters (migrations,
+                               # health check) must already be complete and
+                               # logged before this runs.
 
     local elapsed=$(( $(date +%s) - start_time ))
 
