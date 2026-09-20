@@ -372,6 +372,35 @@ else
     fi
     CLAUDE_JSON="$FAKE_CLAUDE_JSON"
 
+    # Branch 4: a symlinked ~/.claude.json must be followed, not replaced. The
+    # migration writes by atomic rename, so without resolving the link first the
+    # symlink itself would be clobbered by a regular file.
+    FAKE_CLAUDE_JSON_TARGET="$TEST_TMPDIR/dotfiles-claude.json"
+    FAKE_CLAUDE_JSON_LINK="$TEST_TMPDIR/claude-symlink.json"
+    cat > "$FAKE_CLAUDE_JSON_TARGET" <<'EOF'
+{
+  "mcpServers": {
+    "lobster-inbox": {
+      "type": "http",
+      "url": "http://localhost:8766/mcp"
+    }
+  }
+}
+EOF
+    ln -sf "$FAKE_CLAUDE_JSON_TARGET" "$FAKE_CLAUDE_JSON_LINK"
+    CLAUDE_JSON="$FAKE_CLAUDE_JSON_LINK"
+    run_migrations
+    assert_equal "Migration 101 writes through a symlinked ~/.claude.json" \
+        "$MCP_IDLE_TIMEOUT_MS" \
+        "$(jq -r '.mcpServers."lobster-inbox".timeout' "$FAKE_CLAUDE_JSON_TARGET")"
+    if [ -L "$FAKE_CLAUDE_JSON_LINK" ]; then
+        pass "Migration 101 leaves the symlink itself intact (does not replace it with a file)"
+    else
+        fail "Migration 101 leaves the symlink itself intact (does not replace it with a file)" \
+            "the atomic rename clobbered the symlink"
+    fi
+    CLAUDE_JSON="$FAKE_CLAUDE_JSON"
+
     # Host isolation note: we deliberately do NOT checksum the real
     # ~/.claude.json before/after. On a live Lobster host the running Claude
     # Code process rewrites that file continuously (session/project state), so

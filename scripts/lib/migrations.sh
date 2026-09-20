@@ -2564,6 +2564,12 @@ M88_PYEOF
     local _m101_timeout_ms=75000000
     local _m101_claude_json="${CLAUDE_JSON:-$HOME/.claude.json}"
     if [ -f "$_m101_claude_json" ] && command -v jq >/dev/null 2>&1; then
+        # Resolve symlinks first: this migration writes by atomic rename, which
+        # would otherwise replace a symlinked ~/.claude.json (some hosts point
+        # it at a dotfiles checkout) with a regular file, silently detaching it
+        # from wherever it was managed. Rename the real file instead.
+        _m101_claude_json="$(readlink -f "$_m101_claude_json" 2>/dev/null || echo "$_m101_claude_json")"
+
         local _m101_current _m101_registered
         _m101_current=$(jq -r '.mcpServers."lobster-inbox".timeout // "unset"' "$_m101_claude_json" 2>/dev/null || echo "unset")
         _m101_registered=$(jq -r 'if (.mcpServers."lobster-inbox" | type) == "object" then "yes" else "no" end' "$_m101_claude_json" 2>/dev/null || echo "no")
