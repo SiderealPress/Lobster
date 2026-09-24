@@ -1177,8 +1177,15 @@ main() {
     # Load the migration library from the code this run just pulled, not from
     # the copy that was on disk when the run started. Must come after
     # git_pull() and before run_migrations() below.
+    #
+    # Syntax-check first, the same way git_pull() vets health-check-v3.sh: this
+    # file comes from the pull, so a broken one must fail with a named cause
+    # rather than a bare parse error from somewhere inside main().
+    bash -n "$LOBSTER_DIR/scripts/lib/migrations.sh" \
+        || die "Migration library failed syntax check: $LOBSTER_DIR/scripts/lib/migrations.sh" 1
     # shellcheck source=scripts/lib/migrations.sh
-    source "$LOBSTER_DIR/scripts/lib/migrations.sh"
+    source "$LOBSTER_DIR/scripts/lib/migrations.sh" \
+        || die "Could not load migration library: $LOBSTER_DIR/scripts/lib/migrations.sh" 1
 
     show_whats_new            # 2b. Show what's new
     update_python_deps        # 3. Python deps
