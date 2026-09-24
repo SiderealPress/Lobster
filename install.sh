@@ -3605,8 +3605,17 @@ VENV_DIR="$INSTALL_DIR/.venv"
 substep() { info "$1"; }
 log_to_file() { :; }
 
+# Load and verify the migration library with the same guards as upgrade.sh:
+# check existence and syntax before sourcing to provide named diagnostics
+# if the library is missing or broken.
+if [ ! -f "${INSTALL_DIR}/scripts/lib/migrations.sh" ]; then
+    die "Migration library not found: ${INSTALL_DIR}/scripts/lib/migrations.sh"
+fi
+bash -n "${INSTALL_DIR}/scripts/lib/migrations.sh" \
+    || die "Migration library failed syntax check: ${INSTALL_DIR}/scripts/lib/migrations.sh"
 # shellcheck source=scripts/lib/migrations.sh
-source "${INSTALL_DIR}/scripts/lib/migrations.sh"
+source "${INSTALL_DIR}/scripts/lib/migrations.sh" \
+    || die "Could not load migration library: ${INSTALL_DIR}/scripts/lib/migrations.sh"
 run_migrations
 
 #===============================================================================
