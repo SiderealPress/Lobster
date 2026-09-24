@@ -120,26 +120,29 @@ FIXTURE=""
 cleanup_fixture() { [ -n "$FIXTURE" ] && rm -rf "$FIXTURE"; FIXTURE=""; }
 trap cleanup_fixture EXIT
 
-FIXTURE=$(mktemp -d)
-UPSTREAM="$FIXTURE/upstream"
-FAKE_LOBSTER="$FIXTURE/lobster"
-FAKE_HOME="$FIXTURE/home"
-mkdir -p "$UPSTREAM/scripts/lib" "$FAKE_HOME"
+FIXTURE=""
+UPSTREAM=""
+FAKE_LOBSTER=""
+FAKE_HOME=""
 
-# The upstream (origin/main) copy of the library announces itself as NEW.
+# A migrations library that announces which copy of itself is running. Passing
+# the marker "BROKEN" instead writes one that does not parse, to exercise the
+# failure path of the post-pull load.
 write_lib() {
     local path="$1" marker="$2"
+    if [ "$marker" = "BROKEN" ]; then
+        cat > "$path" <<'LIB'
+#!/bin/bash
+run_migrations() { echo "MIGRATIONS_LIB=BROKEN"
+# deliberately unterminated function body
+LIB
+        return
+    fi
     cat > "$path" <<LIB
 #!/bin/bash
 run_migrations() { echo "MIGRATIONS_LIB=$marker"; }
 LIB
 }
-
-# health-check-v3.sh is syntax-checked by git_pull() before it returns.
-cat > "$UPSTREAM/scripts/health-check-v3.sh" <<'HC'
-#!/bin/bash
-: # stub
-HC
 
 # The real script under test -- copied verbatim, then given stub definitions
 # that override every step except git_pull. The stubs are appended AFTER the
@@ -169,34 +172,56 @@ STUBS
 
 git() { command git -c user.email=t@t -c user.name=t -c init.defaultBranch=main "$@"; }
 
-# Upstream commit 1: the OLD library. The local install is cloned from here,
-# so it starts out holding OLD on a clean tree.
-write_lib "$UPSTREAM/scripts/lib/migrations.sh" "OLD"
-git -C "$UPSTREAM" init --quiet -b main
-git -C "$UPSTREAM" add -A
-git -C "$UPSTREAM" commit --quiet -m "old migrations lib"
-git clone --quiet "$UPSTREAM" "$FAKE_LOBSTER"
+# Build a fake install that is exactly one fast-forward behind an origin/main
+# carrying $1 as its migrations library, then run the real upgrade.sh against
+# it. Sets OUTPUT and RUN_EXIT.
+run_scenario() {
+    local upstream_marker="$1"
 
-# Upstream commit 2: the NEW library. Now the local install is exactly one
-# fast-forward behind, and that fast-forward is what rewrites the file
-# mid-run -- the situation the fix is about.
-write_lib "$UPSTREAM/scripts/lib/migrations.sh" "NEW"
-git -C "$UPSTREAM" commit --quiet -am "new migrations lib"
+    cleanup_fixture
+    FIXTURE=$(mktemp -d)
+    UPSTREAM="$FIXTURE/upstream"
+    FAKE_LOBSTER="$FIXTURE/lobster"
+    FAKE_HOME="$FIXTURE/home"
+    mkdir -p "$UPSTREAM/scripts/lib" "$FAKE_HOME"
 
-HARNESS="$FIXTURE/upgrade-harness.sh"
-build_harness "$HARNESS"
+    # health-check-v3.sh is syntax-checked by git_pull() before it returns.
+    cat > "$UPSTREAM/scripts/health-check-v3.sh" <<'HC'
+#!/bin/bash
+: # stub
+HC
 
-OUTPUT=$(
-    cd "$FAKE_LOBSTER" && \
-    HOME="$FAKE_HOME" \
-    LOBSTER_INSTALL_DIR="$FAKE_LOBSTER" \
-    LOBSTER_WORKSPACE="$FAKE_HOME/workspace" \
-    LOBSTER_MESSAGES="$FAKE_HOME/messages" \
-    LOBSTER_CONFIG_DIR="$FAKE_HOME/config" \
-    LOBSTER_USER_CONFIG="$FAKE_HOME/user-config" \
-    bash "$HARNESS" --skip-syncthing --skip-playwright 2>&1
-)
-RUN_EXIT=$?
+    # Upstream commit 1: the OLD library. The local install is cloned from
+    # here, so it starts out holding OLD on a clean tree.
+    write_lib "$UPSTREAM/scripts/lib/migrations.sh" "OLD"
+    git -C "$UPSTREAM" init --quiet -b main
+    git -C "$UPSTREAM" add -A
+    git -C "$UPSTREAM" commit --quiet -m "old migrations lib"
+    git clone --quiet "$UPSTREAM" "$FAKE_LOBSTER"
+
+    # Upstream commit 2: the library under test. The local install is now one
+    # fast-forward behind, and that fast-forward is what rewrites the file
+    # mid-run -- the situation the fix is about.
+    write_lib "$UPSTREAM/scripts/lib/migrations.sh" "$upstream_marker"
+    git -C "$UPSTREAM" commit --quiet -am "upstream migrations lib: $upstream_marker"
+
+    local harness="$FIXTURE/upgrade-harness.sh"
+    build_harness "$harness"
+
+    OUTPUT=$(
+        cd "$FAKE_LOBSTER" && \
+        HOME="$FAKE_HOME" \
+        LOBSTER_INSTALL_DIR="$FAKE_LOBSTER" \
+        LOBSTER_WORKSPACE="$FAKE_HOME/workspace" \
+        LOBSTER_MESSAGES="$FAKE_HOME/messages" \
+        LOBSTER_CONFIG_DIR="$FAKE_HOME/config" \
+        LOBSTER_USER_CONFIG="$FAKE_HOME/user-config" \
+        bash "$harness" --skip-syncthing --skip-playwright 2>&1
+    )
+    RUN_EXIT=$?
+}
+
+run_scenario "NEW"
 
 begin_test "harness run exits 0"
 assert_eq "$RUN_EXIT" "0"
@@ -211,6 +236,42 @@ begin_test "the pull actually replaced the library on disk"
 assert_contains "$(cat "$FAKE_LOBSTER/scripts/lib/migrations.sh")" "MIGRATIONS_LIB=NEW"
 
 if [ "$FAIL" -gt 0 ]; then
+    echo ""
+    echo "--- harness output ---"
+    echo "$OUTPUT"
+fi
+
+echo ""
+
+# ===================================================================
+# Part C: a broken pulled library fails loudly, by name
+#
+# Loading the library is now a fallible mid-run step rather than something
+# that happened before the banner printed, so it has to fail the way the
+# script's other fallible steps do: a named cause and a non-zero exit, not a
+# bare bash parse error from somewhere inside main().
+# ===================================================================
+echo "--- Part C: a pulled library that does not parse aborts the upgrade ---"
+
+PART_C_FAIL_BEFORE=$FAIL
+run_scenario "BROKEN"
+
+begin_test "a broken pulled library makes the run exit non-zero"
+if [ "$RUN_EXIT" -ne 0 ]; then pass; else fail "exited 0"; fi
+
+# Without the explicit guard this still aborts, but only via bash's own parse
+# error -- which is why the assertion is on the script's diagnostic, not merely
+# on the library's filename appearing somewhere in the output.
+begin_test "the failure is reported as a named diagnostic, not a bare parse error"
+assert_contains "$OUTPUT" "Migration library failed syntax check"
+
+begin_test "the diagnostic points at the migration library path"
+assert_contains "$OUTPUT" "scripts/lib/migrations.sh"
+
+begin_test "the upgrade does not report success"
+assert_not_contains "$OUTPUT" "UPGRADE COMPLETE"
+
+if [ "$FAIL" -gt "$PART_C_FAIL_BEFORE" ]; then
     echo ""
     echo "--- harness output ---"
     echo "$OUTPUT"
