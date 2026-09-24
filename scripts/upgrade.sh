@@ -987,8 +987,11 @@ update_systemd_services() {
 # run_migrations() is sourced from scripts/lib/migrations.sh, the single
 # canonical implementation shared with install.sh. See that file's header
 # for required variables/functions.
-# shellcheck source=scripts/lib/migrations.sh
-source "$LOBSTER_DIR/scripts/lib/migrations.sh"
+#
+# The `source` itself lives in main(), AFTER git_pull(). Sourcing it here, at
+# file scope, would bind run_migrations() to the copy of the library that was
+# on disk when the run started, so a run that pulls a new (or fixed) migration
+# would still execute the stale definition for the rest of that same run.
 
 #===============================================================================
 # 10. Health check
@@ -1170,6 +1173,13 @@ main() {
     preflight_checks          # 0. Pre-flight
     backup_config             # 1. Backup
     git_pull                  # 2. Git pull
+
+    # Load the migration library from the code this run just pulled, not from
+    # the copy that was on disk when the run started. Must come after
+    # git_pull() and before run_migrations() below.
+    # shellcheck source=scripts/lib/migrations.sh
+    source "$LOBSTER_DIR/scripts/lib/migrations.sh"
+
     show_whats_new            # 2b. Show what's new
     update_python_deps        # 3. Python deps
     create_new_directories    # 4. New directories
