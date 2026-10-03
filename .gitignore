@@ -90,3 +90,20 @@ lobster-shop/kissinger/context/reference.md
 
 # Stray backup files (should never be committed)
 *.bak
+
+# Instance-specific personal files (never commit — contain personal names/schedules)
+.claude/agents/spec-kit-engineer.md
+scheduled-tasks/ca-license-reminder.sh
+scheduled-tasks/call-alice-reminder.sh
+scheduled-tasks/drew-one-on-one.sh
+scheduled-tasks/edouard-friday-visit-reminder.sh
+scheduled-tasks/electra-weekly-tweet.sh
+scheduled-tasks/environment-prefs-checkin.sh
+scheduled-tasks/gwynn-reminder-*.sh
+scheduled-tasks/meet-alice-paprika.sh
+scheduled-tasks/melissa-reminder-*.sh
+scheduled-tasks/tasks/x-bookmarks.md
+scheduled-tasks/will-price-checkin-*.sh
+scheduled-tasks/x-bookmarks.sh
+src/bot/x_oauth_callback.py
+*.bak-pre-*
