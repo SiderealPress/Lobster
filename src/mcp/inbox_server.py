@@ -9112,6 +9112,28 @@ async def handle_list_projects(arguments: dict[str, Any]) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error listing projects: {e}")]
 
 
+def _resolve_person_alias(person: str, people_dir: Path) -> Path | None:
+    """Resolve a loose person name to a file in people_dir, or None.
+
+    Tries, in order: case-insensitive stem match, slugified match
+    ("Alex Rivera" -> "alex-rivera"), then a unique stem starting with the slug
+    ("alex" -> "alex-rivera.md" when it is the only "alex*" file).
+    """
+    if not people_dir.is_dir():
+        return None
+    files = sorted(people_dir.glob("*.md"))
+    by_lower = {f.stem.lower(): f for f in files}
+    key = person.strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", key).strip("-")
+    for candidate in (key, slug):
+        if candidate and candidate in by_lower:
+            return by_lower[candidate]
+    if not slug:
+        return None
+    prefixed = [f for stem, f in by_lower.items() if stem.startswith(slug)]
+    return prefixed[0] if len(prefixed) == 1 else None
+
+
 async def handle_get_person_context(arguments: dict[str, Any]) -> list[TextContent]:
     """Return a specific person's canonical markdown content."""
     person = arguments.get("person", "")
@@ -9124,6 +9146,8 @@ async def handle_get_person_context(arguments: dict[str, Any]) -> list[TextConte
 
     try:
         path = CANONICAL_DIR / "people" / f"{person}.md"
+        if not path.exists():
+            path = _resolve_person_alias(person, CANONICAL_DIR / "people") or path
         if path.exists():
             return [TextContent(type="text", text=path.read_text())]
         available = [f.stem for f in (CANONICAL_DIR / "people").glob("*.md")] if (CANONICAL_DIR / "people").exists() else []
