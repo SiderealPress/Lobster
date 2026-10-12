@@ -21,8 +21,7 @@
 #   the first render cycle contains the character before the UI is fully settled.
 # - A 60s timeout gives plenty of headroom for slow startup (API calls,
 #   auth checks, initial render).
-# - We send the init prompt, sleep, then send a bare Enter in case the first
-#   carriage return didn't register (observed intermittently on some terminals).
+# - We send the init prompt, then resend Enter until Claude shows it is working (see below).
 # - LOBSTER_MAIN_SESSION=1 is required by the MCP inbox_server session guard.
 # - CLAUDE_CODE_SUBAGENT_MODEL and CLAUDE_AUTOCOMPACT_PCT_OVERRIDE set cost
 #   and quality defaults inherited by all subagents.
@@ -165,15 +164,25 @@ expect {
 
 # Send the initialization command.
 # This instructs Claude to read the project instructions and enter its main loop.
-send "Read CLAUDE.md and begin your main loop. Call wait_for_messages to start listening for Telegram messages. Never exit.\r"
-
-# Wait briefly for Claude to accept the input and begin processing.
-# The render cycle after sending is ~100-300 ms; 3 s is generous.
-sleep 3
-
-# Safety: send a bare Enter in case the carriage return above was dropped
-# (observed intermittently when the terminal emulator is still initialising).
+send "Read CLAUDE.md and begin your main loop. Call wait_for_messages to start listening for Telegram messages. Never exit."
+sleep 1
 send "\r"
+
+# Verify the prompt was actually submitted: while Claude is working its status
+# line shows "esc to interrupt". If that doesn't appear, the Enter was dropped
+# (typically because startup hooks were still running and the UI was busy), so
+# resend it. A single blind retry is not enough: a restart once left the prompt
+# sitting unsubmitted and the dispatcher dead until someone pressed Enter.
+set submitted 0
+for {set i 0} {$i < 24} {incr i} {
+    expect {
+        -timeout 5 "esc to interrupt" { set submitted 1; break }
+        timeout { send "\r" }
+    }
+}
+if {!$submitted} {
+    puts "WARNING: startup prompt not confirmed submitted after retries"
+}
 
 # Hand over terminal control — Claude runs indefinitely.
 # The expect process stays alive so the spawned claude process is not orphaned.
