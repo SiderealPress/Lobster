@@ -21,8 +21,8 @@
 #   the first render cycle contains the character before the UI is fully settled.
 # - A 60s timeout gives plenty of headroom for slow startup (API calls,
 #   auth checks, initial render).
-# - We send the init prompt, sleep, then send a bare Enter in case the first
-#   carriage return didn't register (observed intermittently on some terminals).
+# - We send the init prompt, then resend Enter (max 10x) until the dispatcher
+#   heartbeat updates or Claude shows it is working (see below).
 # - LOBSTER_MAIN_SESSION=1 is required by the MCP inbox_server session guard.
 # - CLAUDE_CODE_SUBAGENT_MODEL and CLAUDE_AUTOCOMPACT_PCT_OVERRIDE set cost
 #   and quality defaults inherited by all subagents.
@@ -165,15 +165,47 @@ expect {
 
 # Send the initialization command.
 # This instructs Claude to read the project instructions and enter its main loop.
-send "Read CLAUDE.md and begin your main loop. Call wait_for_messages to start listening for Telegram messages. Never exit.\r"
-
-# Wait briefly for Claude to accept the input and begin processing.
-# The render cycle after sending is ~100-300 ms; 3 s is generous.
-sleep 3
-
-# Safety: send a bare Enter in case the carriage return above was dropped
-# (observed intermittently when the terminal emulator is still initialising).
+# Remember when we sent the prompt: a dispatcher-heartbeat newer than this
+# proves the prompt was submitted (see below).
+set prompt_sent_at [clock seconds]
+send "Read CLAUDE.md and begin your main loop. Call wait_for_messages to start listening for Telegram messages. Never exit."
+sleep 1
 send "\r"
+
+# Verify the prompt was actually submitted, resending Enter if not. A restart
+# once left the prompt sitting unsubmitted (Enter dropped while startup hooks
+# kept the UI busy) and the dispatcher dead until someone pressed Enter; one
+# blind retry is not enough.
+#
+# Two ways to confirm, either one stops the loop:
+#  1. The dispatcher-heartbeat file (written by hooks/thinking-heartbeat.py after
+#     every dispatcher tool call) is newer than prompt_sent_at. The startup
+#     prompt makes Claude call tools within seconds of being submitted. This
+#     does not depend on Claude Code's UI wording. Caveat: the hook only skips
+#     subagents, so a tool call in some other Claude session on this machine
+#     during the retry window could also refresh it.
+#  2. Claude's status line shows "esc to interrupt" (it is working). UI text, so
+#     a fallback only.
+# Capped (10 tries, 10s apart): if neither signal ever shows up (e.g. the UI
+# wording changed and the heartbeat hook is broken) we send at most 10 extra
+# Enters, which Claude Code ignores on an empty input box, then continue.
+set heartbeat_file [file join $workspace "logs" "dispatcher-heartbeat"]
+set submitted 0
+for {set i 0} {$i < 10} {incr i} {
+    expect {
+        -timeout 10 "esc to interrupt" { set submitted 1; break }
+        timeout {
+            if {![catch {file mtime $heartbeat_file} hb_mtime] && $hb_mtime >= $prompt_sent_at} {
+                set submitted 1
+                break
+            }
+            send "\r"
+        }
+    }
+}
+if {!$submitted} {
+    puts "WARNING: startup prompt not confirmed submitted after 10 attempts"
+}
 
 # Hand over terminal control — Claude runs indefinitely.
 # The expect process stays alive so the spawned claude process is not orphaned.
