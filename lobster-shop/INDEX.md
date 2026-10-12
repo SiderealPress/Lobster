@@ -19,6 +19,7 @@ Browse available skills for your Lobster assistant. Install any skill with one c
 | [Buy Things](./buy-things/) | Purchase items via Telegram — search products, confirm with you, and complete checkout using Camofox browser automation | Tool | Available |
 | [Lobster Dev](./lobster-dev/) | Lobster development context — staging Docker setup, active dev patterns, and known dev environment quirks. Activate when developing or debugging Lobster itself. | Context | Available |
 | [Skill Builder](./skill-builder/) | Guides Lobster users through creating custom skills — scaffolds the correct file layout, explains the two-location model (repo vs instance), and wires MCP tool registration. | Workflow | Available |
+| [Paperclip](./paperclip/) | Board-operator integration for Eloso's Paperclip control plane — read agent state, manage heartbeats/issues/routines via the Paperclip API, never runs as an in-Paperclip agent itself | Integration | In Dev |
 
 ## Templates
 
