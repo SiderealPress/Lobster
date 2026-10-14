@@ -2659,6 +2659,27 @@ M88_PYEOF
         fi
     fi
 
+    # Migration 103: Add LOBSTER_SELF_CHECK_STATUS_PINGS=true to config.env if
+    # missing. periodic-self-check.sh treats an unset key as true, so pinning
+    # the explicit default changes no behaviour; it makes the switch
+    # discoverable. Detection greps the file rather than sourcing it, so an
+    # existing value (including false) is never overwritten and the ambient
+    # environment cannot make the migration skip.
+    if [ -f "$CONFIG_FILE" ]; then
+        if ! grep -q '^LOBSTER_SELF_CHECK_STATUS_PINGS=' "$CONFIG_FILE" 2>/dev/null; then
+            {
+                echo ""
+                echo "# Self-check status pings (periodic-self-check.sh): false or 0 stops the"
+                echo "# \"status?\" messages. See config/config.env.example for details."
+                echo "LOBSTER_SELF_CHECK_STATUS_PINGS=true"
+            } >> "$CONFIG_FILE"
+            substep "Migration 103: added LOBSTER_SELF_CHECK_STATUS_PINGS=true to config.env"
+            migrated=$((migrated + 1))
+        else
+            substep "Migration 103: LOBSTER_SELF_CHECK_STATUS_PINGS already set — skipping"
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
