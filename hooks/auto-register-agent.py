@@ -29,6 +29,7 @@ agent prompt (YAML frontmatter or legacy "task_id is:" text), then:
     chat_id: ADMIN_CHAT_ID_REDACTED
     reply_to_message_id: 10924
     source: telegram
+    task_origin: user        # optional: user | scheduled | internal (default user)
     ---
 
 ## Legacy text format (backward compat)
@@ -170,13 +171,42 @@ def _extract_task_id_from_text(prompt: str) -> str | None:
     return match.group(1) if match else None
 
 
+# Values accepted for the optional `task_origin` frontmatter key. Mirrors the
+# MCP session_start tool and session_store.session_start's own normalisation.
+VALID_TASK_ORIGINS = ("user", "scheduled", "internal")
+DEFAULT_TASK_ORIGIN = "user"
+
+
+def normalize_task_origin(raw: str | None) -> tuple[str, str | None]:
+    """Map a raw frontmatter value to a valid task_origin.
+
+    Returns (task_origin, warning). Absent/empty -> (DEFAULT_TASK_ORIGIN, None).
+    A recognised value (case-insensitive, optional surrounding quotes) passes
+    through with no warning. Anything else falls back to DEFAULT_TASK_ORIGIN
+    and returns a warning string for the caller to log. Pure.
+    """
+    value = (raw or "").strip().strip("\"'").strip().lower()
+    if not value:
+        return DEFAULT_TASK_ORIGIN, None
+    if value in VALID_TASK_ORIGINS:
+        return value, None
+    return DEFAULT_TASK_ORIGIN, (
+        f"unrecognised task_origin {raw!r} in spawn frontmatter; "
+        f"expected one of {'|'.join(VALID_TASK_ORIGINS)}, "
+        f"recorded as {DEFAULT_TASK_ORIGIN!r}"
+    )
+
+
 def extract_metadata(prompt: str) -> dict:
-    """Return a dict with task_id, chat_id, source, reply_to_message_id from prompt.
+    """Return task_id, chat_id, source, reply_to_message_id and task_origin.
 
     Tries YAML frontmatter first. Falls back to text parsing for task_id.
-    All values are strings (or None if absent).
+    All values are strings (or None if absent), except task_origin, which is
+    always one of VALID_TASK_ORIGINS; task_origin_warning is a message to log
+    when the frontmatter carried an unrecognised value (None otherwise).
     """
     fm = _parse_yaml_frontmatter(prompt)
+    task_origin, task_origin_warning = normalize_task_origin(fm.get("task_origin"))
 
     task_id = fm.get("task_id") or _extract_task_id_from_text(prompt)
     chat_id = fm.get("chat_id")
@@ -190,6 +220,8 @@ def extract_metadata(prompt: str) -> dict:
         "reply_to_message_id": (
             str(reply_to_message_id) if reply_to_message_id is not None else None
         ),
+        "task_origin": task_origin,
+        "task_origin_warning": task_origin_warning,
     }
 
 
@@ -248,6 +280,7 @@ def insert_agent_session(
     output_file: str | None,
     input_summary: str | None,
     dispatcher_pid: int | None = None,
+    task_origin: str = DEFAULT_TASK_ORIGIN,
 ) -> None:
     """Insert a 'running' row into agent_sessions.db.
 
@@ -288,16 +321,18 @@ def insert_agent_session(
                 trigger_message_id  TEXT,
                 trigger_snippet     TEXT,
                 reply_message_ids   TEXT,
+                task_origin         TEXT DEFAULT 'user',
                 pid                 INTEGER,
                 dispatcher_pid      INTEGER,
                 pid_captured_at     TEXT
             )
         """)
         # Additive migration for DBs created before this hook wrote the
-        # pid/dispatcher_pid/pid_captured_at columns (mirrors session_store.py's
+        # task_origin/pid/dispatcher_pid/pid_captured_at columns (mirrors session_store.py's
         # _MIGRATION_STMTS pattern). Each ALTER is a no-op on a fresh table that
         # already has the column from the CREATE TABLE above.
         for stmt in (
+            "ALTER TABLE agent_sessions ADD COLUMN task_origin TEXT DEFAULT 'user'",
             "ALTER TABLE agent_sessions ADD COLUMN pid INTEGER",
             "ALTER TABLE agent_sessions ADD COLUMN dispatcher_pid INTEGER",
             "ALTER TABLE agent_sessions ADD COLUMN pid_captured_at TEXT",
@@ -314,10 +349,10 @@ def insert_agent_session(
             INSERT OR IGNORE INTO agent_sessions
                 (id, task_id, agent_type, description, chat_id, source,
                  status, output_file, input_summary, spawned_at,
-                 dispatcher_pid, pid_captured_at)
+                 dispatcher_pid, pid_captured_at, task_origin)
             VALUES
                 (?, ?, 'subagent', 'auto-registered by PostToolUse hook', ?, ?,
-                 'running', ?, ?, ?, ?, ?)
+                 'running', ?, ?, ?, ?, ?, ?)
             """,
             (
                 agent_id,
@@ -329,6 +364,7 @@ def insert_agent_session(
                 now,
                 dispatcher_pid,
                 pid_captured_at,
+                task_origin,
             ),
         )
         conn.commit()
@@ -450,6 +486,8 @@ def main() -> None:
 
         prompt = tool_input.get("prompt", "")
         metadata = extract_metadata(prompt)
+        if metadata["task_origin_warning"]:
+            _log_failure(f"warning: {metadata['task_origin_warning']}")
         agent_id = extract_agent_id(tool_response)
         output_file = extract_output_file(tool_response)
 
@@ -472,6 +510,7 @@ def main() -> None:
             output_file=output_file,
             input_summary=input_summary,
             dispatcher_pid=dispatcher_pid,
+            task_origin=metadata["task_origin"],
         )
 
         write_inflight_running_entry(
