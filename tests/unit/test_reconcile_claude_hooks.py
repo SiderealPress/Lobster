@@ -63,6 +63,15 @@ SUBAGENT_STOP_EVENT = "SubagentStop"
 REQUIRE_WRITE_RESULT_TIMEOUT = 10
 EMPTY_MATCHER = ""
 
+# SessionStart hooks (issue #2285): install.sh registers write-dispatcher-session-id
+# (timeout 5) before on-compact (timeout 30), both with matcher "". Role
+# detection must run before any hook that asks "is this the dispatcher?".
+SESSION_START_EVENT = "SessionStart"
+WRITE_DISPATCHER_SESSION_ID_NAME = "write-dispatcher-session-id"
+WRITE_DISPATCHER_SESSION_ID_TIMEOUT = 5
+ON_COMPACT_NAME = "on-compact"
+ON_COMPACT_TIMEOUT = 30
+
 EXIT_NOOP = 0
 EXIT_REPAIRED = 1
 EXIT_FATAL = 2
@@ -275,6 +284,82 @@ class TestRequireWriteResultCanonical:
 
         assert REQUIRE_WRITE_RESULT_NAME not in repaired
         assert new_settings["hooks"][SUBAGENT_STOP_EVENT] == [existing]
+
+
+class TestSessionStartCanonical:
+    """Issue #2285: the two SessionStart hooks whose absence fails silently."""
+
+    @pytest.mark.parametrize(
+        "name, timeout",
+        [
+            (WRITE_DISPATCHER_SESSION_ID_NAME, WRITE_DISPATCHER_SESSION_ID_TIMEOUT),
+            (ON_COMPACT_NAME, ON_COMPACT_TIMEOUT),
+        ],
+    )
+    def test_canonical_includes_session_start_hooks(self, name: str, timeout: int) -> None:
+        install_dir = Path("/opt/lobster")
+        hook = _canonical_by_name(install_dir).get(name)
+        assert hook is not None, f"{name} missing from the canonical list"
+        assert hook["event"] == SESSION_START_EVENT
+        assert hook["command_match"] == name
+        # matcher "" for both: on-compact self-gates on source == "compact"
+        # because matcher "compact" fires unreliably (issue #1947).
+        assert hook["entry"]["matcher"] == EMPTY_MATCHER
+        (inner,) = hook["entry"]["hooks"]
+        assert inner["command"] == f"python3 {install_dir}/hooks/{name}.py"
+        assert inner["timeout"] == timeout
+
+    def test_session_start_hooks_repaired_in_role_detection_order(self) -> None:
+        """write-dispatcher-session-id must be appended before on-compact."""
+        canonical = _mod._canonical_critical_hooks(Path("/opt/lobster"))
+        new_settings, repaired = reconcile({"hooks": {}}, canonical)
+
+        assert repaired.index(WRITE_DISPATCHER_SESSION_ID_NAME) < repaired.index(ON_COMPACT_NAME)
+        commands = _commands(new_settings, SESSION_START_EVENT)
+        first = next(i for i, c in enumerate(commands) if WRITE_DISPATCHER_SESSION_ID_NAME in c)
+        second = next(i for i, c in enumerate(commands) if ON_COMPACT_NAME in c)
+        assert first < second
+
+    def test_legacy_compact_matcher_on_compact_entry_is_not_duplicated(self) -> None:
+        """An on-compact entry still on matcher "compact" counts as present.
+
+        Converting its matcher is Migration 88's job; the reconciler only
+        heals absence and must not add a second on-compact entry.
+        """
+        install_dir = Path("/opt/lobster")
+        canonical = _mod._canonical_critical_hooks(install_dir)
+        legacy = {
+            "matcher": "compact",
+            "hooks": [{"type": "command", "command": f"python3 {install_dir}/hooks/on-compact.py", "timeout": 30}],
+        }
+        settings = _fully_wired_settings(install_dir)
+        settings["hooks"][SESSION_START_EVENT] = [
+            e for e in settings["hooks"][SESSION_START_EVENT]
+            if ON_COMPACT_NAME not in e["hooks"][0]["command"]
+        ] + [legacy]
+
+        new_settings, repaired = reconcile(settings, canonical)
+
+        assert repaired == []
+        on_compact = [c for c in _commands(new_settings, SESSION_START_EVENT) if ON_COMPACT_NAME in c]
+        assert len(on_compact) == 1
+
+    def test_on_compact_repaired_when_only_another_compact_matcher_entry_exists(self) -> None:
+        """A different hook on matcher "compact" must not mask a missing on-compact."""
+        install_dir = Path("/opt/lobster")
+        canonical = _mod._canonical_critical_hooks(install_dir)
+        settings = _fully_wired_settings(install_dir)
+        settings["hooks"][SESSION_START_EVENT] = [
+            e for e in settings["hooks"][SESSION_START_EVENT]
+            if ON_COMPACT_NAME not in e["hooks"][0]["command"]
+        ] + [{
+            "matcher": "compact",
+            "hooks": [{"type": "command", "command": f"python3 {install_dir}/hooks/inject-bootup-context.py", "timeout": 10}],
+        }]
+
+        _new_settings, repaired = reconcile(settings, canonical)
+
+        assert repaired == [ON_COMPACT_NAME]
 
 
 # ---------------------------------------------------------------------------

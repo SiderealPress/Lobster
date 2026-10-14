@@ -105,6 +105,23 @@ def _canonical_critical_hooks(install_dir: Path) -> list[dict]:
       and appends the inflight "done" entry. When it is missing, subagents
       simply exit; the only symptom is stale-subagent alerts later. Matcher and
       timeout match install.sh's setup_claude_hooks() registration.
+    - write-dispatcher-session-id (SessionStart): writes the dispatcher
+      session-id marker and the agent_type='dispatcher' row in
+      agent_sessions.db that later hooks and reconcilers use to tell the
+      dispatcher from subagents. Listed BEFORE on-compact so role detection
+      has run by the time on-compact asks "is this the dispatcher?" (same
+      order as install.sh's top-level registration blocks).
+    - on-compact (SessionStart): queues the compact-reminder and records the
+      compaction timestamp. When it is missing, post-compaction recovery
+      simply never starts.
+
+    Both SessionStart entries use matcher "" on purpose. on-compact self-gates
+    on the payload's `source == "compact"`; matcher "compact" is unreliable
+    (it fired on only a fraction of compactions, issue #1947), and Migration
+    88 already converts old matcher="compact" entries to "". An existing
+    on-compact entry on matcher "compact" still counts as present here
+    (hook_present() matches on the command only), so the reconciler never
+    duplicates it.
     """
     return [
         {
@@ -133,6 +150,36 @@ def _canonical_critical_hooks(install_dir: Path) -> list[dict]:
                         "type": "command",
                         "command": f"python3 {install_dir}/hooks/require-write-result.py",
                         "timeout": 10,
+                    }
+                ],
+            },
+        },
+        {
+            "name": "write-dispatcher-session-id",
+            "event": "SessionStart",
+            "command_match": "write-dispatcher-session-id",
+            "entry": {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"python3 {install_dir}/hooks/write-dispatcher-session-id.py",
+                        "timeout": 5,
+                    }
+                ],
+            },
+        },
+        {
+            "name": "on-compact",
+            "event": "SessionStart",
+            "command_match": "on-compact",
+            "entry": {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"python3 {install_dir}/hooks/on-compact.py",
+                        "timeout": 30,
                     }
                 ],
             },
