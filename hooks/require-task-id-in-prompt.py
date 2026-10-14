@@ -37,6 +37,12 @@ Once task_id is present, the frontmatter is also checked for `chat_id` and
 
 The decision logic is pure and lives in spawn_frontmatter.py; this file does
 the I/O. A missing task_id is always blocked, independent of the mode.
+
+## Exempt: built-in helper agents
+
+Spawns whose ``subagent_type`` is on the helper allowlist (default
+``Explore,Plan``; see hooks/helper_agent_types.py) are allowed without a
+task_id: they never call write_result, so a task_id has nothing to match.
 """
 import json
 import os
@@ -44,6 +50,9 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from helper_agent_types import is_helper_agent_type  # noqa: E402
 
 
 def _has_task_id_in_frontmatter(prompt: str) -> bool:
@@ -113,6 +122,11 @@ except Exception as e:
     sys.exit(0)
 
 if tool != "Agent":
+    sys.exit(0)
+
+subagent_type = inp.get("subagent_type")
+if is_helper_agent_type(subagent_type):
+    print(f"helper spawn exempted: {subagent_type}", file=sys.stderr)
     sys.exit(0)
 
 prompt = inp.get("prompt", "")

@@ -6,6 +6,12 @@ Injects a reminder if write_result was not called during the session.
 Dispatcher sessions (detected via session_role.is_dispatcher()) are exempt —
 the dispatcher never calls write_result, so the check only applies to subagents.
 
+Built-in helper agents are exempt too: a SubagentStop whose agent type is on
+the allowlist in hooks/helper_agent_types.py (default ``Explore,Plan``) exits
+0 without write_result. The type comes from the payload's ``agent_type``
+field, falling back to the sibling ``.meta.json`` Claude Code writes next to
+the agent transcript.
+
 When write_result was called, this hook also marks the session completed in
 agent_sessions.db synchronously — without relying on the unreliable server-side
 auto-unregister path in inbox_server.py.
@@ -95,6 +101,7 @@ from pathlib import Path
 # Import shared session role utility.
 sys.path.insert(0, str(Path(__file__).parent))
 from session_role import is_dispatcher, get_session_id
+from helper_agent_types import is_helper_agent_type, subagent_stop_agent_type
 
 # JSON to emit on every successful (allow) exit — suppresses the
 # "Stop hook feedback: No stderr output" injection that CC 2.1.76+ produces
@@ -577,6 +584,12 @@ def main():
 
     hook_event = data.get("hook_event_name", "")
     is_subagentstop = hook_event == "SubagentStop"
+
+    # Built-in helper agents (Explore, Plan) never run the write_result
+    # protocol and were never registered, so there is nothing to enforce.
+    if is_subagentstop and is_helper_agent_type(subagent_stop_agent_type(data)):
+        _cleanup_fire_state(_fire_count_path(_agent_key(data)))
+        _exit_ok()
 
     if is_subagentstop:
         # SubagentStop: transcript is in a JSONL file at agent_transcript_path.

@@ -22,6 +22,11 @@ agent prompt (YAML frontmatter or legacy "task_id is:" text), then:
    when no task_id is present, since inflight-work.jsonl entries are keyed by
    task_id.
 
+Built-in helper agents (``subagent_type`` on the allowlist in
+hooks/helper_agent_types.py, default ``Explore,Plan``) get neither: they never
+call write_result, so a row for them would stay ``running`` until the
+reconciler reported it as a completion or ghost.
+
 ## Frontmatter format (preferred)
 
     ---
@@ -98,6 +103,9 @@ if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
 import agents.pid_liveness as _pid_liveness  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from helper_agent_types import is_helper_agent_type  # noqa: E402
 
 
 def _capture_dispatcher_pid() -> int | None:
@@ -481,6 +489,8 @@ def main() -> None:
 
     try:
         tool_input = data.get("tool_input", {})
+        if is_helper_agent_type(tool_input.get("subagent_type")):
+            sys.exit(0)
         tool_response = data.get("tool_response")
         session_id = data.get("session_id", "")
 

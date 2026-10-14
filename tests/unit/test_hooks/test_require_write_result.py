@@ -1062,3 +1062,80 @@ class TestPlanAgentIdClose:
         # Dispatcher-exclusion invariant (docs/INVARIANTS.md): never close the
         # dispatcher's own row from a subagent stop.
         assert mod._own_agent_row({**row, "agent_type": "dispatcher"}, "agent-fixture-01") is None
+
+
+# ---------------------------------------------------------------------------
+# Built-in read-only helper agents (Explore, Plan) exit without write_result
+# ---------------------------------------------------------------------------
+
+def _helper_subagentstop_input(transcript_file: Path, agent_id: str, agent_type) -> dict:
+    data = _make_subagentstop_hook_input(str(transcript_file), agent_id=agent_id)
+    if agent_type is not None:
+        data["agent_type"] = agent_type
+    return data
+
+
+@pytest.mark.parametrize("helper_type", ["Explore", "Plan"])
+def test_helper_type_exits_0_without_write_result(monkeypatch, tmp_path, helper_type):
+    """SubagentStop payloads carry `agent_type`; a helper type is never asked
+    for write_result (it has no task_id and no Lobster result to report)."""
+    monkeypatch.delenv("LOBSTER_HELPER_AGENT_TYPES", raising=False)
+    mod = _load_hook(monkeypatch, tmp_path)
+    transcript_file = tmp_path / "agent-fixture-helper-02.jsonl"
+    _write_jsonl_transcript(transcript_file, _make_transcript_no_write_result())
+    agent_id = f"agent-fixture-helper-02-{helper_type}"
+
+    exit_code, stdout, stderr = _run_hook(
+        mod, _helper_subagentstop_input(transcript_file, agent_id, helper_type)
+    )
+
+    assert exit_code == 0, f"helper blocked: {stderr}"
+    assert json.loads(stdout.strip()).get("suppressOutput") is True
+    assert not mod._fire_count_path(mod._agent_key({"agent_id": agent_id})).exists()
+
+
+def test_helper_type_from_meta_json_when_payload_lacks_agent_type(monkeypatch, tmp_path):
+    """Fallback for payloads without `agent_type`: Claude Code writes a sibling
+    agent-<id>.meta.json carrying `agentType` next to the agent transcript."""
+    monkeypatch.delenv("LOBSTER_HELPER_AGENT_TYPES", raising=False)
+    mod = _load_hook(monkeypatch, tmp_path)
+    transcript_file = tmp_path / "agent-fixture-helper-03.jsonl"
+    _write_jsonl_transcript(transcript_file, _make_transcript_no_write_result())
+    (tmp_path / "agent-fixture-helper-03.meta.json").write_text(
+        json.dumps({"agentType": "Explore", "description": "search"})
+    )
+
+    exit_code, _, stderr = _run_hook(
+        mod, _helper_subagentstop_input(transcript_file, "agent-fixture-helper-03", None)
+    )
+    assert exit_code == 0, f"helper blocked: {stderr}"
+
+
+def test_non_helper_type_still_blocked_without_write_result(monkeypatch, tmp_path):
+    monkeypatch.delenv("LOBSTER_HELPER_AGENT_TYPES", raising=False)
+    mod = _load_hook(monkeypatch, tmp_path)
+    transcript_file = tmp_path / "agent-fixture-worker-02.jsonl"
+    _write_jsonl_transcript(transcript_file, _make_transcript_no_write_result())
+    agent_id = "agent-fixture-worker-02"
+    try:
+        exit_code, _, _ = _run_hook(
+            mod, _helper_subagentstop_input(transcript_file, agent_id, "lobster-generalist")
+        )
+        assert exit_code == 2
+    finally:
+        mod._cleanup_fire_state(mod._fire_count_path(mod._agent_key({"agent_id": agent_id})))
+
+
+def test_helper_exemption_disabled_by_empty_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOBSTER_HELPER_AGENT_TYPES", "")
+    mod = _load_hook(monkeypatch, tmp_path)
+    transcript_file = tmp_path / "agent-fixture-helper-04.jsonl"
+    _write_jsonl_transcript(transcript_file, _make_transcript_no_write_result())
+    agent_id = "agent-fixture-helper-04"
+    try:
+        exit_code, _, _ = _run_hook(
+            mod, _helper_subagentstop_input(transcript_file, agent_id, "Explore")
+        )
+        assert exit_code == 2
+    finally:
+        mod._cleanup_fire_state(mod._fire_count_path(mod._agent_key({"agent_id": agent_id})))

@@ -384,3 +384,59 @@ class TestSpawnFrontmatterPure:
     def test_warn_line_format(self):
         line = sf.format_warn_line("2000-01-01T00:00:00Z", None, ("chat_id", "source"))
         assert line == "2000-01-01T00:00:00Z subagent_type=- missing=chat_id,source"
+
+
+# ---------------------------------------------------------------------------
+# Built-in read-only helper agents (Explore, Plan) are exempt
+# ---------------------------------------------------------------------------
+
+_HELPER_ENV_VAR = "LOBSTER_HELPER_AGENT_TYPES"
+_DEFAULT_HELPER_TYPES = ("Explore", "Plan")
+
+
+def _make_agent_input(subagent_type: str, prompt: str = "Find where X is defined.") -> dict:
+    return {
+        "hook_event_name": "PreToolUse",
+        "session_id": "sess-test",
+        "tool_name": "Agent",
+        "tool_input": {"prompt": prompt, "subagent_type": subagent_type},
+    }
+
+
+@pytest.mark.parametrize("helper_type", _DEFAULT_HELPER_TYPES)
+def test_explore_plan_exempt(monkeypatch, helper_type):
+    """A built-in read-only helper spawn needs no task_id: it never calls
+    write_result, so there is nothing for a task_id to correlate."""
+    monkeypatch.delenv(_HELPER_ENV_VAR, raising=False)
+    exit_code, _, stderr = _run_hook(_make_agent_input(helper_type))
+    assert exit_code == 0, f"helper {helper_type} was blocked: {stderr}"
+    assert f"helper spawn exempted: {helper_type}" in stderr
+
+
+def test_non_helper_type_still_requires_task_id(monkeypatch):
+    monkeypatch.delenv(_HELPER_ENV_VAR, raising=False)
+    exit_code, _, stderr = _run_hook(_make_agent_input("lobster-generalist"))
+    assert exit_code == 2
+    assert "BLOCKED" in stderr
+
+
+def test_helper_match_is_exact_name(monkeypatch):
+    """Allowlist matching is exact: a lookalike type is not exempt."""
+    monkeypatch.delenv(_HELPER_ENV_VAR, raising=False)
+    for lookalike in ("explore", "Explorer", "Plan-x"):
+        exit_code, _, _ = _run_hook(_make_agent_input(lookalike))
+        assert exit_code == 2, f"{lookalike!r} should not be exempt"
+
+
+def test_helper_allowlist_env_override(monkeypatch):
+    """Empty env value disables the exemption; a custom list replaces the default."""
+    monkeypatch.setenv(_HELPER_ENV_VAR, "")
+    exit_code, _, _ = _run_hook(_make_agent_input("Explore"))
+    assert exit_code == 2, "empty allowlist must disable the exemption"
+
+    monkeypatch.setenv(_HELPER_ENV_VAR, " Custom , ")
+    exit_code, _, stderr = _run_hook(_make_agent_input("Custom"))
+    assert exit_code == 0, stderr
+    assert "helper spawn exempted: Custom" in stderr
+    exit_code, _, _ = _run_hook(_make_agent_input("Explore"))
+    assert exit_code == 2, "a custom list replaces the default, it does not extend it"
