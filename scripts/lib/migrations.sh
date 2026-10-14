@@ -2059,16 +2059,25 @@ print(f'prune-pr-worktrees: {result.status}')
         migrated=$((migrated + 1))
     fi
 
-    # Migration 86: Remove write-dispatcher-session-id SessionStart hook from settings.json
-    # (issue #1908). Dispatcher detection now uses the launcher-written startup flag file
-    # instead of a UUID written by this hook. The hook file is deleted; the settings.json
-    # entry must be removed from existing installs.
+    # Migration 86: Remove a DANGLING write-dispatcher-session-id SessionStart entry.
+    # Originally (issue #1908) this deleted the entry unconditionally, on the assumption
+    # that the hook file was gone. It is not: hooks/write-dispatcher-session-id.py still
+    # ships, install.sh registers it (top-level SessionStart block), and it writes the
+    # dispatcher session-id marker and the agent_type='dispatcher' session row that other
+    # hooks and reconcilers rely on. Since install.sh runs migrations after registering
+    # hooks, the unconditional delete undid that registration on every install/upgrade,
+    # and it would fight scripts/reconcile-claude-hooks.py, which now re-adds the entry
+    # (issue #2285). The number is kept so the sequence stays stable; the migration is a
+    # no-op while the hook file exists and only removes an entry pointing at a missing
+    # file (such an entry makes every SessionStart hook invocation error).
     if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
-        if jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("write-dispatcher-session-id"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        if [ -f "$LOBSTER_DIR/hooks/write-dispatcher-session-id.py" ]; then
+            substep "write-dispatcher-session-id hook file present — keeping its settings.json entry (Migration 86)"
+        elif jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("write-dispatcher-session-id"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
             TMP_SETTINGS=$(mktemp)
             jq 'del(.hooks.SessionStart[] | select(.hooks[]?.command | contains("write-dispatcher-session-id")))' \
                 "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-            substep "Removed write-dispatcher-session-id hook from settings.json (Migration 86)"
+            substep "Removed dangling write-dispatcher-session-id hook from settings.json (Migration 86)"
             migrated=$((migrated + 1))
         else
             substep "write-dispatcher-session-id hook not found in settings.json — skipping Migration 86"

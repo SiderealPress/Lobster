@@ -31,6 +31,13 @@
 # block) and asserts the real system crontab is byte-for-byte unchanged
 # after run_migrations() executes.
 #
+# Also verifies (issue #2285): Migration 86 no longer deletes the
+# write-dispatcher-session-id SessionStart entry while the hook file exists
+# (install.sh registers it and the hook-wiring reconciler heals it, so the
+# old unconditional delete made the three fight). It still removes a dangling
+# entry whose hook file is gone, since a settings.json entry pointing at a
+# missing file breaks every hook invocation.
+#
 # Usage: bash tests/test-migrations-lib.sh
 #        (run from repo root or any directory)
 #===============================================================================
@@ -444,6 +451,51 @@ if [ -n "$REAL_CRONTAB_BIN" ]; then
 else
     pass "Real system crontab is byte-for-byte unchanged after run_migrations() (skipped: no crontab binary on this host)"
 fi
+
+#===============================================================================
+# Group 1d: Migration 86 — write-dispatcher-session-id entry (issue #2285)
+#===============================================================================
+echo ""
+echo "-- Migration 86 keeps write-dispatcher-session-id while the hook file exists --"
+
+if ! command -v jq >/dev/null 2>&1; then
+    pass "Migration 86 assertions (skipped: jq not available on this host)"
+else
+    M86_SETTINGS="$TEST_TMPDIR/settings-m86.json"
+    M86_HOOK_FILE="$LOBSTER_DIR/hooks/write-dispatcher-session-id.py"
+    write_m86_fixture() {
+        cat > "$M86_SETTINGS" <<EOF
+{
+  "hooks": {
+    "SessionStart": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "python3 $LOBSTER_DIR/hooks/write-dispatcher-session-id.py", "timeout": 5}]}
+    ]
+  }
+}
+EOF
+    }
+    count_m86_entries() {
+        jq '[.hooks.SessionStart[]? | select(.hooks[]?.command | contains("write-dispatcher-session-id"))] | length' "$M86_SETTINGS"
+    }
+
+    CLAUDE_SETTINGS="$M86_SETTINGS"
+
+    # Hook file present: the entry is live wiring, not a leftover.
+    mkdir -p "$LOBSTER_DIR/hooks"
+    : > "$M86_HOOK_FILE"
+    write_m86_fixture
+    run_migrations
+    assert_count "Migration 86 leaves the hook when the file exists" "1" "$(count_m86_entries)"
+
+    # Hook file absent: a dangling entry is still cleaned up.
+    rm -f "$M86_HOOK_FILE"
+    write_m86_fixture
+    run_migrations
+    assert_count "Migration 86 removes a dangling entry when the hook file is absent" "0" "$(count_m86_entries)"
+
+    CLAUDE_SETTINGS="$FAKE_CLAUDE_SETTINGS"
+fi
+
 
 #===============================================================================
 # Group 2: install.sh actually wires the runner in (the real bug fix)
