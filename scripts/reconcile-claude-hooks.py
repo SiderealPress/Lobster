@@ -96,6 +96,15 @@ def _canonical_critical_hooks(install_dir: Path) -> list[dict]:
     source of truth for fresh installs. Add an entry here only when its
     absence causes a *silent* failure (no error, no trace) rather than a loud
     one — that's the class of bug this script exists to close.
+
+    Entries are appended in list order, so order matters within an event.
+
+    - auto-register-agent (PostToolUse): records every background spawn.
+    - require-write-result (SubagentStop, issue #2285): enforces write_result
+      before a subagent exits, recovers a synthetic result when it does not,
+      and appends the inflight "done" entry. When it is missing, subagents
+      simply exit; the only symptom is stale-subagent alerts later. Matcher and
+      timeout match install.sh's setup_claude_hooks() registration.
     """
     return [
         {
@@ -108,6 +117,21 @@ def _canonical_critical_hooks(install_dir: Path) -> list[dict]:
                     {
                         "type": "command",
                         "command": f"python3 {install_dir}/hooks/auto-register-agent.py",
+                        "timeout": 10,
+                    }
+                ],
+            },
+        },
+        {
+            "name": "require-write-result",
+            "event": "SubagentStop",
+            "command_match": "require-write-result",
+            "entry": {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"python3 {install_dir}/hooks/require-write-result.py",
                         "timeout": 10,
                     }
                 ],
