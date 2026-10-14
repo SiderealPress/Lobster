@@ -871,3 +871,57 @@ class TestNormalizeTaskOrigin:
     def test_extract_metadata_carries_task_origin(self):
         meta = extract_metadata("---\ntask_id: t\ntask_origin: internal\n---\n")
         assert meta["task_origin"] == "internal"
+
+
+# ---------------------------------------------------------------------------
+# Built-in read-only helper agents (Explore, Plan) are not registered
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("helper_type", ["Explore", "Plan"])
+def test_helper_type_not_registered(monkeypatch, tmp_path, helper_type):
+    """A helper spawn writes no agent_sessions row and no inflight-work line,
+    so the reconciler never reports it as a completion or ghost — even when
+    its prompt happens to carry a task_id."""
+    monkeypatch.delenv("LOBSTER_HELPER_AGENT_TYPES", raising=False)
+    hook_input = _make_hook_input_with_tool_input(
+        tool_input={
+            "prompt": "---\ntask_id: helper-fixture-01\nchat_id: 1000001\n---\nFind X.",
+            "subagent_type": helper_type,
+            "description": "search",
+        },
+        tool_response={"agentId": "agent-fixture-helper-01"},
+    )
+    exit_code, _, _ = _run_hook(hook_input, tmp_path)
+    assert exit_code == 0
+
+    # A conftest fixture may pre-create the DB file without the table, so
+    # "no row" means: no DB, no table, or no matching row.
+    db_path = tmp_path / "messages" / "config" / "agent_sessions.db"
+    if db_path.exists():
+        conn = _open_db(tmp_path)
+        try:
+            has_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_sessions'"
+            ).fetchone()
+        finally:
+            conn.close()
+        if has_table:
+            assert _get_row(tmp_path, "agent-fixture-helper-01") is None
+    inflight = tmp_path / "workspace" / "data" / "inflight-work.jsonl"
+    assert _read_jsonl(inflight) == []
+
+
+def test_non_helper_type_still_registered(monkeypatch, tmp_path):
+    monkeypatch.delenv("LOBSTER_HELPER_AGENT_TYPES", raising=False)
+    hook_input = _make_hook_input_with_tool_input(
+        tool_input={
+            "prompt": "---\ntask_id: worker-fixture-01\nchat_id: 1000001\n---\nDo X.",
+            "subagent_type": "lobster-generalist",
+        },
+        tool_response={"agentId": "agent-fixture-worker-01"},
+    )
+    exit_code, _, _ = _run_hook(hook_input, tmp_path)
+    assert exit_code == 0
+    assert _get_row(tmp_path, "agent-fixture-worker-01") is not None
+    inflight = tmp_path / "workspace" / "data" / "inflight-work.jsonl"
+    assert len(_read_jsonl(inflight)) == 1
