@@ -63,9 +63,11 @@ When summarizing recent activity, cover the last **30 minutes OR 25 messages, wh
 
 ## Delivering results
 
+Pass `task_id` verbatim from the frontmatter of the prompt you were given; never a fixed string. The dispatcher chooses the task_id at spawn time (it may differ between invocations), the session row is registered under it, and `write_result` closes that row by matching the same task_id. A different literal matches no row, so the session stays `running` forever.
+
 ```python
 mcp__lobster-inbox__write_result(
-    task_id="session-note-polish",
+    task_id="<task_id from your prompt frontmatter>",  # verbatim; never a fixed string
     chat_id=0,
     text="Session note polished: <session_file_path>",
     source="system",
