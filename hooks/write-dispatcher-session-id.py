@@ -34,6 +34,13 @@ misclassify a restart as a subagent, the reconciler's dispatcher-type skip
 guard (added in the same issue) will still prevent agent_failed from being
 emitted for any session tagged 'dispatcher'.
 
+Because the reconciler never retires dispatcher rows, the hook does it itself:
+before inserting the new row, every other running dispatcher row (except the
+static 'lobster-dispatcher' main-loop row) is marked dead with
+stop_reason='superseded_dispatcher'. Without this, one stale 'running' row
+accumulated per dispatcher session and all of them were listed on every
+wait_for_messages call.
+
 ## Stale marker recovery
 
 If the dispatcher crashes or is killed without a clean `lobster stop`, the
@@ -85,11 +92,19 @@ sys.path.insert(0, str(_SRC_DIR))
 
 import session_role  # noqa: E402 — path insert must precede this
 from agents import session_store  # noqa: E402
+from utils.agent_types import DISPATCHER_AGENT_TYPE  # noqa: E402
 
 # A JSONL file not modified for longer than this is treated as belonging to an
 # idle or dead session.  Active dispatcher sessions append to their JSONL on
 # every message, so 3 hours of silence indicates the session has ended.
 JSONL_MAX_IDLE_SECONDS = 3 * 60 * 60  # 3 hours
+
+# Static agent_id the live dispatcher uses for its own session_start call
+# (see scripts/agent-monitor.py _DISPATCHER_AGENT_ID). The hook never retires it.
+MAIN_LOOP_DISPATCHER_ID = "lobster-dispatcher"
+
+# stop_reason recorded on dispatcher rows retired because a newer session started.
+SUPERSEDED_STOP_REASON = "superseded_dispatcher"
 
 
 def _stored_session_is_alive(stored_session_id: str) -> bool:
@@ -144,20 +159,61 @@ def _is_dispatcher_session(session_id: str) -> bool:
     return not _stored_session_is_alive(stored)
 
 
-def _register_dispatcher_session(session_id: str) -> None:
+def _retire_superseded_dispatcher_rows(conn, session_id: str, now: str) -> int:
+    """Mark every other running dispatcher row dead; return how many changed.
+
+    Each new dispatcher session registers its own row, and the reconciler skips
+    agent_type='dispatcher' rows by design, so without this step old rows stay
+    'running' forever and are listed on every wait_for_messages call.
+
+    Never touches:
+    - the current session's row (id = session_id)
+    - the static main-loop row (MAIN_LOOP_DISPATCHER_ID), which the live
+      dispatcher writes itself via session_start and which the hook did not create
+    - non-dispatcher rows or rows that are already finished
+    """
+    cursor = conn.execute(
+        """
+        UPDATE agent_sessions
+           SET status = 'dead',
+               completed_at = ?,
+               stop_reason = ?,
+               notified_at = COALESCE(notified_at, ?)
+         WHERE agent_type = ?
+           AND status = 'running'
+           AND id NOT IN (?, ?)
+        """,
+        (
+            now,
+            SUPERSEDED_STOP_REASON,
+            now,
+            DISPATCHER_AGENT_TYPE,
+            session_id,
+            MAIN_LOOP_DISPATCHER_ID,
+        ),
+    )
+    return cursor.rowcount
+
+
+def _register_dispatcher_session(session_id: str, db_path: Path | None = None) -> None:
     """Write a 'running' row to agent_sessions.db tagged as agent_type='dispatcher'.
 
     The reconciler skips sessions with agent_type='dispatcher', so this row
     prevents any future ghost-session cascade even if the marker-file check
     mis-fires.  Uses INSERT OR IGNORE so a richer row written by a concurrent
-    caller (rare) is left untouched.  Failures are logged and silently swallowed.
+    caller (rare) is left untouched.  Before inserting, rows left behind by
+    earlier dispatcher sessions are retired (see
+    _retire_superseded_dispatcher_rows).  Failures are logged and silently
+    swallowed.
     """
     from datetime import datetime, timezone
 
+    path = db_path or session_store._DEFAULT_DB_PATH
     try:
-        session_store.init_db()
-        conn = session_store._get_connection(session_store._DEFAULT_DB_PATH)
+        session_store.init_db(path)
+        conn = session_store._get_connection(path)
         now = datetime.now(timezone.utc).isoformat()
+        _retire_superseded_dispatcher_rows(conn, session_id, now)
         conn.execute(
             """
             INSERT OR IGNORE INTO agent_sessions
