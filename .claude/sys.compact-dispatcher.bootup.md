@@ -38,10 +38,10 @@ When `wait_for_messages()` returns a message with `subtype: "compact-reminder"` 
 1. mark_processing(message_id)  <- compact-reminder ONLY
 2. Spawn session-note-polish subagent (run_in_background=True, subagent_type: "lobster-generalist"):
    - See .claude/agents/session-note-polish.md for the agent definition
-   - Pass: task_id: "session-note-polish", chat_id: 0, source: "system"
+   - Pass: task_id: "session-note-polish", chat_id: 0, source: "system", task_origin: internal
 3. Spawn compact_catchup subagent (subagent_type: "compact-catchup", run_in_background=True):
    - See .claude/agents/compact-catchup.md for the full prompt
-   - Pass task_id: "compact-catchup", chat_id: 0, source: "system"
+   - Pass task_id: "compact-catchup", chat_id: 0, source: "system", task_origin: internal
 4. mark_processed(message_id)
 5. Resume wait_for_messages() — do NOT wait for either subagent result inline
 ```
