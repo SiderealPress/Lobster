@@ -84,54 +84,48 @@ fi
 # If claude count is <= 1, only the main session exists (no subagents to check on)
 CLAUDE_COUNT=$(pgrep -c -f "claude" 2>/dev/null || echo "0")
 
-# Source agent status scanner for both status and completion detection
+# Source agent status scanner (running-agent summary for the status? text).
+#
+# Completion is NOT reported from here. Subagents report completion through
+# write_result, which writes a subagent_result inbox file the dispatcher
+# relays; the SubagentStop hook require-write-result.py enforces that call.
+# A completion message derived from task output files would be a second,
+# lower-fidelity notification of the same event.
 AGENT_STATUS_SCRIPT="${LOBSTER_INSTALL_DIR:-$HOME/lobster}/scripts/agent-status.sh"
 source "$AGENT_STATUS_SCRIPT"
 
-# Check for completed tasks first (works even if subagents already exited)
-COMPLETED_TASKS=$(scan_completed_tasks)
+# Query SQLite agent_sessions DB for pending (running/starting) agents.
+# pending-agents.json was migrated to SQLite and is no longer authoritative.
+# Exclude agent_type='dispatcher' — the dispatcher's own session is always
+# registered as running/starting and would otherwise be counted as a
+# "pending agent" on every firing, producing a permanent false positive.
+# DISPATCHER_EXCLUSION_SQL is the shared single source of truth (BIS-723,
+# scripts/lib/agent_sessions.sh) for this check — it must match
+# DISPATCHER_EXCLUSION_SQL in src/utils/agent_types.py, used by the
+# equivalent Python-side checks in session_store.py and inbox_server.py
+# (see #781 / PR #2099 / PR #2103 for the history of this filter being
+# fixed independently at each call site before consolidation).
+source "${LOBSTER_INSTALL_DIR:-$HOME/lobster}/scripts/lib/agent_sessions.sh"
+PENDING_COUNT=$(sqlite3 "$MESSAGES_DIR/config/agent_sessions.db" \
+    "SELECT COUNT(*) FROM agent_sessions WHERE status IN ('running','starting') AND ${DISPATCHER_EXCLUSION_SQL}" \
+    2>/dev/null || echo "0")
 
-if [ -n "$COMPLETED_TASKS" ]; then
-    # Completed task found — inject structured completion message.
-    # This replaces the generic "status?" prompt with actionable info,
-    # so the dispatcher can relay results directly without LLM reasoning
-    # about what to check.
-    SELF_CHECK_TEXT="[Task Completed] ${COMPLETED_TASKS}"
-else
-    # Query SQLite agent_sessions DB for pending (running/starting) agents.
-    # pending-agents.json was migrated to SQLite and is no longer authoritative.
-    # Exclude agent_type='dispatcher' — the dispatcher's own session is always
-    # registered as running/starting and would otherwise be counted as a
-    # "pending agent" on every firing, producing a permanent false positive.
-    # DISPATCHER_EXCLUSION_SQL is the shared single source of truth (BIS-723,
-    # scripts/lib/agent_sessions.sh) for this check — it must match
-    # DISPATCHER_EXCLUSION_SQL in src/utils/agent_types.py, used by the
-    # equivalent Python-side checks in session_store.py and inbox_server.py
-    # (see #781 / PR #2099 / PR #2103 for the history of this filter being
-    # fixed independently at each call site before consolidation).
-    source "${LOBSTER_INSTALL_DIR:-$HOME/lobster}/scripts/lib/agent_sessions.sh"
-    PENDING_COUNT=$(sqlite3 "$MESSAGES_DIR/config/agent_sessions.db" \
-        "SELECT COUNT(*) FROM agent_sessions WHERE status IN ('running','starting') AND ${DISPATCHER_EXCLUSION_SQL}" \
-        2>/dev/null || echo "0")
+# Only inject a status check if subagents are still running. The DB session
+# count is authoritative: if there are zero pending (non-dispatcher) sessions,
+# do nothing. CLAUDE_COUNT is not reliable here because the dispatcher itself
+# is always running (count >= 1 even with no subagents).
+if [ "$PENDING_COUNT" -eq 0 ] 2>/dev/null; then
+    exit 0
+fi
 
-    # No completed tasks — only inject status check if subagents are still
-    # running. The DB session count is authoritative: if there are zero pending
-    # (non-dispatcher) sessions, do nothing. CLAUDE_COUNT is not reliable here
-    # because the dispatcher itself is always running (count >= 1 even with no
-    # subagents).
-    if [ "$PENDING_COUNT" -eq 0 ] 2>/dev/null; then
-        exit 0
-    fi
+AGENT_SUMMARY=$(scan_agent_status)
 
-    AGENT_SUMMARY=$(scan_agent_status)
-
-    SELF_CHECK_TEXT="status? (Self-check)"
-    if [ -n "$AGENT_SUMMARY" ]; then
-        SELF_CHECK_TEXT="status? (Self-check) | ${AGENT_SUMMARY}"
-    fi
-    if [ "$PENDING_COUNT" -gt 0 ] 2>/dev/null; then
-        SELF_CHECK_TEXT="${SELF_CHECK_TEXT} [${PENDING_COUNT} agents pending]"
-    fi
+SELF_CHECK_TEXT="status? (Self-check)"
+if [ -n "$AGENT_SUMMARY" ]; then
+    SELF_CHECK_TEXT="status? (Self-check) | ${AGENT_SUMMARY}"
+fi
+if [ "$PENDING_COUNT" -gt 0 ] 2>/dev/null; then
+    SELF_CHECK_TEXT="${SELF_CHECK_TEXT} [${PENDING_COUNT} agents pending]"
 fi
 
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%S.%6N)
