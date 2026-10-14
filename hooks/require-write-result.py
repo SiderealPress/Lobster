@@ -33,11 +33,14 @@ To close both rows we call session_end() with up to three identifiers:
      when the dispatcher set task_id in register_agent, or when the subagent uses
      a stable task_id that both parties know).
   b. The session_id from hook data (matches the auto-register stub by `id`).
+  c. The agent_id from SubagentStop hook data (matches the proper row by
+     `id`). This reaches the row even when the write_result task_id differs
+     from the spawn task_id; the row's spawn task_id is then also marked done
+     in inflight-work.jsonl (see `_plan_agent_id_close`).
 
-The proper hex-ID row is the primary target but is only reachable when
-task_id matches. When it is not reachable via this hook, the reconciler in
-inbox_server.py will close it when it detects stop_reason=end_turn in the
-output file.
+When none of these reach the proper row (e.g. a Stop event, which carries
+no agent_id), the reconciler in inbox_server.py will close it when it
+detects stop_reason=end_turn in the output file.
 
 ## SubagentStop vs Stop transcript handling
 
@@ -217,6 +220,61 @@ def _mark_session_notified(id_or_task_id: str) -> None:
         set_notified(id_or_task_id)
     except Exception:
         pass  # DB update is best-effort; never block exit
+
+
+def _own_agent_row(row: dict | None, agent_id: str) -> dict | None:
+    """Return row only if it is the spawned agent's own, non-dispatcher row.
+
+    Pure. find_session() matches on `id` OR `task_id`, so a row is accepted
+    only when its `id` equals agent_id exactly. The dispatcher's own row is
+    never closed from a subagent stop (Dispatcher-Exclusion invariant,
+    docs/INVARIANTS.md).
+    """
+    if not row or row.get("id") != agent_id:
+        return None
+    if (row.get("agent_type") or "") == "dispatcher":
+        return None
+    return row
+
+
+def _plan_agent_id_close(
+    write_result_task_ids: list[str],
+    agent_id: str | None,
+    spawn_task_id: str | None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return (ids_to_close, done_task_ids) for the agent_id close path.
+
+    Pure. The SubagentStop payload's agent_id is the `id` of the row that
+    auto-register-agent.py inserted at spawn, while that row's `task_id` (and
+    the matching inflight-work "running" entry) comes from the prompt
+    frontmatter. When the task_id passed to write_result differs from the
+    spawn task_id, the write_result-keyed close matches no row, so:
+
+    - ids_to_close: agent_id, unless it was already tried as a write_result
+      task_id.
+    - done_task_ids: the spawn task_id, unless a write_result task_id already
+      covered it.
+    """
+    if not agent_id:
+        return (), ()
+    already = set(write_result_task_ids)
+    ids_to_close = () if agent_id in already else (agent_id,)
+    done_task_ids = (
+        (spawn_task_id,) if spawn_task_id and spawn_task_id not in already else ()
+    )
+    return ids_to_close, done_task_ids
+
+
+def _find_session_row(agent_id: str) -> dict | None:
+    """Best-effort read of the session row for agent_id. None on any failure."""
+    try:
+        hooks_dir = Path(__file__).parent
+        repo_src = hooks_dir.parent / "src"
+        sys.path.insert(0, str(repo_src))
+        from agents.session_store import find_session  # noqa: PLC0415
+        return find_session(agent_id)
+    except Exception:
+        return None  # DB read is best-effort; never block exit
 
 
 def _load_transcript_from_jsonl(path: str) -> list:
@@ -659,6 +717,24 @@ def main():
                 _mark_session_notified(tid)
             if session_id:
                 _mark_session_notified(session_id)
+
+            # Close the spawned agent's own row by the payload agent_id (its
+            # `id` column), and mark its spawn task_id done in inflight-work.
+            # The write_result task_id may differ from the spawn task_id (fixed
+            # string in an agent definition, typo, per-invocation suffix), in
+            # which case the task_id-keyed calls above match nothing.
+            agent_id = data.get("agent_id") or ""
+            if agent_id:
+                row = _own_agent_row(_find_session_row(agent_id), agent_id)
+                if row is not None:
+                    ids_to_close, done_task_ids = _plan_agent_id_close(
+                        write_result_task_ids, agent_id, row.get("task_id")
+                    )
+                    for aid in ids_to_close:
+                        _mark_session_completed(aid)
+                        _mark_session_notified(aid)
+                    for tid in done_task_ids:
+                        _append_inflight_done_entry(tid)
 
             # Clean up any fire-count temp file — the agent eventually called
             # write_result, so reset the counter for this session.

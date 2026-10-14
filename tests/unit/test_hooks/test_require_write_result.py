@@ -848,3 +848,217 @@ class TestInflightDoneEntry:
         entries = _read_jsonl(self._inflight_work_file(tmp_path))
         task_ids_done = {e["task_id"] for e in entries if e.get("status") == "done"}
         assert {"t-multi-a", "t-multi-b"} <= task_ids_done
+
+
+# ---------------------------------------------------------------------------
+# Close the spawned agent's row by payload agent_id (refs #2257)
+# ---------------------------------------------------------------------------
+
+_SRC_DIR = Path(__file__).parents[3] / "src"
+
+# Synthetic identifiers. The spawn task_id (registered from the prompt
+# frontmatter) deliberately differs from the task_id passed to write_result.
+_FIXTURE_AGENT_ID = "agent-fixture-01"
+_FIXTURE_SPAWN_TASK_ID = "catchup-fixture-a"
+_FIXTURE_WRITE_RESULT_TASK_ID = "catchup-fixture"
+_FIXTURE_CHAT_ID = 1000001
+
+
+@pytest.fixture
+def isolated_session_db(monkeypatch, tmp_path):
+    """Point agents.session_store at a temp DB and return the session_store module.
+
+    session_store resolves its DB path from LOBSTER_MESSAGES at import time,
+    so both the env var and the module-level default are overridden: nothing
+    in these tests may touch a real ~/messages directory.
+    """
+    messages_dir = tmp_path / "messages"
+    monkeypatch.setenv("LOBSTER_MESSAGES", str(messages_dir))
+    if str(_SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(_SRC_DIR))
+    from agents import session_store  # noqa: PLC0415
+
+    db_path = messages_dir / "config" / "agent_sessions.db"
+    monkeypatch.setattr(session_store, "_DEFAULT_DB_PATH", db_path)
+    session_store.init_db(db_path)
+    yield session_store
+    session_store._close_connection(db_path)
+
+
+def _register_running_row(session_store, agent_id: str, task_id: str) -> None:
+    session_store.session_start(
+        id=agent_id,
+        description="fixture subagent",
+        chat_id=_FIXTURE_CHAT_ID,
+        agent_type="general-purpose",
+        task_id=task_id,
+    )
+
+
+def _row_by_id(session_store, agent_id: str) -> dict:
+    conn = session_store._get_connection(session_store._DEFAULT_DB_PATH)
+    row = conn.execute(
+        "SELECT * FROM agent_sessions WHERE id = ?", (agent_id,)
+    ).fetchone()
+    return dict(row)
+
+
+class TestCloseByAgentId:
+    """SubagentStop must close the spawned agent's row via the payload
+    agent_id (the row's `id`), not only via the task_id string found in the
+    write_result call. When the two task_ids differ, the row would otherwise
+    stay 'running' forever and the inflight 'done' entry would be written
+    under a task_id nobody is waiting for.
+    """
+
+    def _inflight_work_file(self, tmp_path: Path) -> Path:
+        return tmp_path / "lobster-workspace" / "data" / "inflight-work.jsonl"
+
+    def test_done_under_spawn_task_id_resolved_by_agent_id(
+        self, monkeypatch, tmp_path, isolated_session_db
+    ):
+        session_store = isolated_session_db
+        _register_running_row(session_store, _FIXTURE_AGENT_ID, _FIXTURE_SPAWN_TASK_ID)
+        mod = _load_hook(monkeypatch, tmp_path)
+
+        transcript_file = tmp_path / "agent-sub.jsonl"
+        _write_jsonl_transcript(
+            transcript_file,
+            _make_transcript_with_write_result(
+                chat_id=_FIXTURE_CHAT_ID, task_id=_FIXTURE_WRITE_RESULT_TASK_ID
+            ),
+        )
+        hook_input = _make_subagentstop_hook_input(
+            str(transcript_file), agent_id=_FIXTURE_AGENT_ID
+        )
+        exit_code, _, stderr = _run_hook(mod, hook_input)
+
+        assert exit_code == 0, f"Expected exit 0, got {exit_code}. stderr={stderr}"
+
+        row = _row_by_id(session_store, _FIXTURE_AGENT_ID)
+        assert row["status"] == "completed"
+        assert row["completed_at"] is not None
+        assert row["notified_at"] is not None
+
+        done_task_ids = {
+            e["task_id"]
+            for e in _read_jsonl(self._inflight_work_file(tmp_path))
+            if e.get("status") == "done"
+        }
+        # Existing behaviour is kept (write_result task_id) ...
+        assert _FIXTURE_WRITE_RESULT_TASK_ID in done_task_ids
+        # ... and the spawn task_id, which is what inflight 'running' entries
+        # are keyed by, is now also marked done.
+        assert _FIXTURE_SPAWN_TASK_ID in done_task_ids
+
+    def test_missing_agent_id_falls_back(
+        self, monkeypatch, tmp_path, isolated_session_db
+    ):
+        """Without agent_id in the payload, only the write_result task_id path
+        runs: a row whose task_id matches is closed, and exactly one done entry
+        is written for it."""
+        session_store = isolated_session_db
+        _register_running_row(session_store, _FIXTURE_AGENT_ID, _FIXTURE_SPAWN_TASK_ID)
+        mod = _load_hook(monkeypatch, tmp_path)
+
+        transcript_file = tmp_path / "agent-sub.jsonl"
+        _write_jsonl_transcript(
+            transcript_file,
+            _make_transcript_with_write_result(
+                chat_id=_FIXTURE_CHAT_ID, task_id=_FIXTURE_SPAWN_TASK_ID
+            ),
+        )
+        hook_input = _make_subagentstop_hook_input(str(transcript_file))
+        del hook_input["agent_id"]
+        exit_code, _, stderr = _run_hook(mod, hook_input)
+
+        assert exit_code == 0, f"Expected exit 0, got {exit_code}. stderr={stderr}"
+        assert _row_by_id(session_store, _FIXTURE_AGENT_ID)["status"] == "completed"
+        done_entries = [
+            e for e in _read_jsonl(self._inflight_work_file(tmp_path))
+            if e.get("status") == "done"
+        ]
+        assert [e["task_id"] for e in done_entries] == [_FIXTURE_SPAWN_TASK_ID]
+
+    def test_agent_id_without_row_is_harmless(
+        self, monkeypatch, tmp_path, isolated_session_db
+    ):
+        """An agent_id with no DB row (e.g. never auto-registered) changes
+        nothing beyond the existing write_result task_id handling."""
+        mod = _load_hook(monkeypatch, tmp_path)
+
+        transcript_file = tmp_path / "agent-sub.jsonl"
+        _write_jsonl_transcript(
+            transcript_file,
+            _make_transcript_with_write_result(
+                chat_id=_FIXTURE_CHAT_ID, task_id=_FIXTURE_WRITE_RESULT_TASK_ID
+            ),
+        )
+        hook_input = _make_subagentstop_hook_input(
+            str(transcript_file), agent_id="agent-fixture-unregistered"
+        )
+        exit_code, _, _ = _run_hook(mod, hook_input)
+
+        assert exit_code == 0
+        done_task_ids = [
+            e["task_id"] for e in _read_jsonl(self._inflight_work_file(tmp_path))
+        ]
+        assert done_task_ids == [_FIXTURE_WRITE_RESULT_TASK_ID]
+
+
+class TestPlanAgentIdClose:
+    """Direct tests of the pure planning helper."""
+
+    def test_differing_spawn_task_id_closes_agent_and_marks_spawn_task_done(
+        self, monkeypatch, tmp_path
+    ):
+        mod = _load_hook(monkeypatch, tmp_path)
+        ids_to_close, done_task_ids = mod._plan_agent_id_close(
+            ["catchup-fixture"], "agent-fixture-01", "catchup-fixture-a"
+        )
+        assert ids_to_close == ("agent-fixture-01",)
+        assert done_task_ids == ("catchup-fixture-a",)
+
+    def test_matching_spawn_task_id_adds_no_duplicate_done_entry(
+        self, monkeypatch, tmp_path
+    ):
+        mod = _load_hook(monkeypatch, tmp_path)
+        ids_to_close, done_task_ids = mod._plan_agent_id_close(
+            ["catchup-fixture-a"], "agent-fixture-01", "catchup-fixture-a"
+        )
+        assert ids_to_close == ("agent-fixture-01",)
+        assert done_task_ids == ()
+
+    def test_agent_id_already_used_as_write_result_task_id_is_not_repeated(
+        self, monkeypatch, tmp_path
+    ):
+        mod = _load_hook(monkeypatch, tmp_path)
+        ids_to_close, done_task_ids = mod._plan_agent_id_close(
+            ["agent-fixture-01"], "agent-fixture-01", None
+        )
+        assert ids_to_close == ()
+        assert done_task_ids == ()
+
+    def test_no_agent_id_plans_nothing(self, monkeypatch, tmp_path):
+        mod = _load_hook(monkeypatch, tmp_path)
+        assert mod._plan_agent_id_close(["catchup-fixture"], "", "catchup-fixture-a") == ((), ())
+        assert mod._plan_agent_id_close(["catchup-fixture"], None, None) == ((), ())
+
+    def test_row_without_task_id_still_closes_by_agent_id(self, monkeypatch, tmp_path):
+        mod = _load_hook(monkeypatch, tmp_path)
+        assert mod._plan_agent_id_close(["catchup-fixture"], "agent-fixture-01", None) == (
+            ("agent-fixture-01",),
+            (),
+        )
+
+    def test_agent_row_requires_exact_id_and_non_dispatcher(self, monkeypatch, tmp_path):
+        mod = _load_hook(monkeypatch, tmp_path)
+        row = {"id": "agent-fixture-01", "task_id": "catchup-fixture-a", "agent_type": "general-purpose"}
+        assert mod._own_agent_row(row, "agent-fixture-01") == row
+        # find_session() also matches on the task_id column; a row whose `id`
+        # differs from agent_id is not the spawned agent's row.
+        assert mod._own_agent_row({**row, "id": "agent-fixture-02"}, "agent-fixture-01") is None
+        assert mod._own_agent_row(None, "agent-fixture-01") is None
+        # Dispatcher-exclusion invariant (docs/INVARIANTS.md): never close the
+        # dispatcher's own row from a subagent stop.
+        assert mod._own_agent_row({**row, "agent_type": "dispatcher"}, "agent-fixture-01") is None
