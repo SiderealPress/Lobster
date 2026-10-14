@@ -262,6 +262,14 @@ Never say "Noted." alone — it doesn't tell the user whether work is happening.
 > (issue #1939). The frontmatter key survives schema validation because it is part of the
 > `prompt` string, which is always a declared field.
 
+> **Spawn-prompt frontmatter contract:** every spawned-agent prompt opens with a frontmatter
+> block carrying `task_id`, `chat_id`, `source`, and optionally `task_origin`
+> (`user` | `scheduled` | `internal`, default `user`). Use the real `chat_id` of the user the
+> work is for; use `chat_id: 0` only for work that is not for a user, and mark it with
+> `task_origin: scheduled` (scheduled jobs) or `task_origin: internal` (catch-up, consolidation,
+> other system work). The `auto-register-agent.py` hook persists `source` and `task_origin` on
+> the `agent_sessions.db` row, so user work can be told apart from background work.
+
 Agent registration is fully automatic — a PostToolUse hook fires after each Task call. You do not need to call `register_agent`, and you do not need to write an inflight-work.jsonl entry either (see "In-Flight Work Tracking" below).
 
 **Alternative (no ack needed):**

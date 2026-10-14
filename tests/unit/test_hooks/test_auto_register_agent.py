@@ -742,3 +742,132 @@ class TestInflightRunningEntry:
         # DB registration still succeeded despite inflight-work.jsonl failure.
         row = _get_row(tmp_path, "agent-inflight-fail")
         assert row is not None
+
+
+# ---------------------------------------------------------------------------
+# task_origin persistence
+#
+# The spawn-prompt frontmatter may declare where the work came from:
+# task_origin: user | scheduled | internal (the same three values the MCP
+# session_start tool accepts). Without this, every auto-registered row looks
+# like user-originated work, so dispatcher-spawned work cannot be told apart
+# from scheduled or internal work, and nothing downstream can enforce "a
+# user-originated spawn must carry a real chat_id".
+# ---------------------------------------------------------------------------
+
+class TestTaskOriginPersistence:
+    def test_task_origin_scheduled_persisted(self, tmp_path):
+        """Frontmatter task_origin: scheduled is stored on the row as-is."""
+        prompt = (
+            "---\ntask_id: scheduled-fixture-a\nchat_id: 0\n"
+            "source: system\ntask_origin: scheduled\n---\nRun the job."
+        )
+        hook_input = _make_hook_input(
+            prompt=prompt,
+            tool_response={"agentId": "agent-fixture-01"},
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        row = _get_row(tmp_path, "agent-fixture-01")
+        assert row is not None
+        assert row["task_origin"] == "scheduled"
+        assert row["source"] == "system"
+
+    def test_task_origin_defaults_to_user(self, tmp_path):
+        """A spawn whose frontmatter omits task_origin is recorded as 'user'."""
+        prompt = "---\ntask_id: user-fixture-a\nchat_id: 1000001\nsource: telegram\n---\nDo work."
+        hook_input = _make_hook_input(
+            prompt=prompt,
+            tool_response={"agentId": "agent-fixture-02"},
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        row = _get_row(tmp_path, "agent-fixture-02")
+        assert row is not None
+        assert row["task_origin"] == _mod.DEFAULT_TASK_ORIGIN == "user"
+
+    def test_task_origin_invalid_falls_back_to_user(self, tmp_path):
+        """An unrecognised task_origin is stored as 'user' and a warning is logged."""
+        prompt = "---\ntask_id: bogus-fixture-a\nchat_id: 1000001\ntask_origin: cron-ish\n---\nDo work."
+        hook_input = _make_hook_input(
+            prompt=prompt,
+            tool_response={"agentId": "agent-fixture-03"},
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        row = _get_row(tmp_path, "agent-fixture-03")
+        assert row is not None
+        assert row["task_origin"] == "user"
+
+        log_path = tmp_path / "workspace" / "logs" / "hook-failures.log"
+        assert log_path.exists(), "Expected an invalid task_origin to be logged"
+        log_content = log_path.read_text()
+        assert "task_origin" in log_content
+        assert "cron-ish" in log_content
+
+    def test_task_origin_column_added_to_preexisting_table(self, tmp_path):
+        """A DB created before the column existed is migrated additively."""
+        db_dir = tmp_path / "messages" / "config"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_dir / "agent_sessions.db"))
+        conn.execute("""
+            CREATE TABLE agent_sessions (
+                id TEXT PRIMARY KEY, task_id TEXT, agent_type TEXT,
+                description TEXT NOT NULL, chat_id TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'telegram',
+                status TEXT NOT NULL DEFAULT 'running',
+                output_file TEXT, input_summary TEXT, spawned_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        prompt = "---\ntask_id: internal-fixture-a\nchat_id: 0\ntask_origin: internal\n---"
+        hook_input = _make_hook_input(
+            prompt=prompt,
+            tool_response={"agentId": "agent-fixture-04"},
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        row = _get_row(tmp_path, "agent-fixture-04")
+        assert row is not None
+        assert row["task_origin"] == "internal"
+
+
+class TestNormalizeTaskOrigin:
+    """Pure normalisation: valid values pass through, anything else -> 'user'."""
+
+    @pytest.mark.parametrize("raw", ["user", "scheduled", "internal"])
+    def test_valid_values_pass_through(self, raw):
+        origin, warning = _mod.normalize_task_origin(raw)
+        assert origin == raw
+        assert warning is None
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("Scheduled", "scheduled"),
+        ('"internal"', "internal"),
+        ("  user  ", "user"),
+    ])
+    def test_case_and_quotes_tolerated(self, raw, expected):
+        origin, warning = _mod.normalize_task_origin(raw)
+        assert origin == expected
+        assert warning is None
+
+    @pytest.mark.parametrize("raw", [None, ""])
+    def test_absent_defaults_to_user_without_warning(self, raw):
+        origin, warning = _mod.normalize_task_origin(raw)
+        assert origin == "user"
+        assert warning is None
+
+    def test_unknown_value_defaults_to_user_with_warning(self):
+        origin, warning = _mod.normalize_task_origin("nightly")
+        assert origin == "user"
+        assert warning is not None and "nightly" in warning
+
+    def test_extract_metadata_carries_task_origin(self):
+        meta = extract_metadata("---\ntask_id: t\ntask_origin: internal\n---\n")
+        assert meta["task_origin"] == "internal"
