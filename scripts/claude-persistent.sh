@@ -718,6 +718,26 @@ wait_for_wake() {
 }
 
 #===============================================================================
+# Startup alert
+#
+# The "Lobster Starting" alert is sent once per main() invocation, i.e. on
+# every lobster-claude.service start: manual restarts, deploys, scheduled
+# recycles and every iteration of a crash/restart loop alike. During a restart
+# loop this produces many near-identical messages in a short window, and
+# LOBSTER_DEBUG does not control this path. LOBSTER_STARTUP_NOTIFY (default
+# true, preserving the original behavior) lets an operator silence it; when
+# false, the suppression is recorded in the log instead.
+#===============================================================================
+maybe_send_startup_alert() {
+    if [[ "${LOBSTER_STARTUP_NOTIFY:-true}" == "true" ]]; then
+        send_telegram_alert "🔄 *Lobster Starting*
+Claude persistent session initializing."
+    else
+        log "Startup Telegram alert suppressed (LOBSTER_STARTUP_NOTIFY=false)"
+    fi
+}
+
+#===============================================================================
 # Main Loop
 #===============================================================================
 main() {
@@ -748,8 +768,7 @@ main() {
     # expecting a running Claude process or a drained inbox.
     write_boot_stamp
 
-    send_telegram_alert "🔄 *Lobster Starting*
-Claude persistent session initializing."
+    maybe_send_startup_alert
 
     local attempt=0
     local max_rapid_restarts=5
