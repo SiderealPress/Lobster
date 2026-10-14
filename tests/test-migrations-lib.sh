@@ -298,14 +298,14 @@ cat > "$FAKE_CLAUDE_JSON_NO_SERVER" <<'EOF'
 }
 EOF
 
-# Migrations 96 and 100 gate on `[ -z "${VAR:-}" ]` after sourcing the fake
+# Migrations 96, 100 and 102 gate on `[ -z "${VAR:-}" ]` after sourcing the fake
 # config.env, so they skip whenever the *ambient* environment already exports
 # those keys — which is exactly the case when this suite is run from inside a
 # live Lobster/Claude Code session that has them set. That made the two
 # config.env assertions below fail for environmental reasons unrelated to the
 # migrations. Clear them so the suite tests the migration, not the shell it
 # happens to be launched from.
-unset CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT CLAUDE_CODE_FORK_SUBAGENT
+unset CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT CLAUDE_CODE_FORK_SUBAGENT LOBSTER_SPAWN_FRONTMATTER_MODE
 
 # shellcheck source=../scripts/lib/migrations.sh
 source "$LIB"
@@ -324,6 +324,13 @@ assert_file_contains "Migration 100 applies CLAUDE_CODE_FORK_SUBAGENT=0 to confi
 run_migrations
 occurrences=$(grep -c "^CLAUDE_CODE_FORK_SUBAGENT=" "$CONFIG_FILE")
 assert_count "Migration 100 is idempotent (running twice does not duplicate the key)" "1" "$occurrences"
+
+assert_file_contains "Migration 102 applies LOBSTER_SPAWN_FRONTMATTER_MODE=warn to config.env" \
+    "$CONFIG_FILE" "LOBSTER_SPAWN_FRONTMATTER_MODE=warn"
+
+run_migrations
+occurrences=$(grep -c "^LOBSTER_SPAWN_FRONTMATTER_MODE=" "$CONFIG_FILE")
+assert_count "Migration 102 is idempotent (running twice does not duplicate the key)" "1" "$occurrences"
 
 #===============================================================================
 # Group 1c: Migration 101 — lobster-inbox MCP idle timeout in ~/.claude.json

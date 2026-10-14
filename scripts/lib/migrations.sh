@@ -2629,6 +2629,27 @@ M88_PYEOF
         fi
     fi
 
+    # Migration 102: Add LOBSTER_SPAWN_FRONTMATTER_MODE=warn to config.env if
+    # missing. require-task-id-in-prompt.py checks that spawn-prompt
+    # frontmatter carries chat_id and source (chat_id: 0 only with
+    # task_origin scheduled|internal). Pinning the explicit default makes the
+    # setting discoverable in config.env; the hook already treats an unset
+    # key as warn, so this changes no behaviour.
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" 2>/dev/null || true
+        if [ -z "${LOBSTER_SPAWN_FRONTMATTER_MODE:-}" ]; then
+            echo "" >> "$CONFIG_FILE"
+            echo "# Spawn-prompt frontmatter check: warn (log and allow) or block." >> "$CONFIG_FILE"
+            echo "# See config/config.env.example for details." >> "$CONFIG_FILE"
+            echo "LOBSTER_SPAWN_FRONTMATTER_MODE=warn" >> "$CONFIG_FILE"
+            substep "Migration 102: added LOBSTER_SPAWN_FRONTMATTER_MODE=warn to config.env"
+            migrated=$((migrated + 1))
+        else
+            substep "Migration 102: LOBSTER_SPAWN_FRONTMATTER_MODE already set — skipping"
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
