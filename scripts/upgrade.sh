@@ -574,13 +574,43 @@ show_whats_new() {
 # 3. Python dependencies
 #===============================================================================
 
+# Exact-pin fallback, used only when `uv sync --frozen` cannot run (uv absent
+# or the frozen sync failed). Every version here must equal the one pinned in
+# uv.lock; tests/test-upgrade-python-deps.sh fails if they drift apart. The
+# primary path below needs no list: it installs whatever uv.lock pins.
+PINNED_PIP_FALLBACK=(
+    mcp==1.26.0
+    python-telegram-bot==22.6
+    watchdog==6.0.0
+    python-dotenv==1.2.1
+    slack-sdk==3.40.1
+    slack-bolt==1.27.0
+)
+PINNED_PIP_FALLBACK_BROWSER=(
+    playwright==1.58.0
+)
+
+# pip install of the exact-pin fallback set into $VENV_DIR. Never uses
+# --upgrade, so it cannot float a package past its pinned version.
+install_pinned_pip_fallback() {
+    # shellcheck source=/dev/null
+    source "$VENV_DIR/bin/activate"
+    pip install --quiet "${PINNED_PIP_FALLBACK[@]}" 2>/dev/null \
+        || warn "Pinned pip fallback failed -- venv may be missing dependencies"
+    if ! $SKIP_PLAYWRIGHT; then
+        pip install --quiet "${PINNED_PIP_FALLBACK_BROWSER[@]}" 2>/dev/null \
+            || warn "Failed to pip install playwright"
+    fi
+    deactivate
+}
+
 update_python_deps() {
     step "Updating Python dependencies"
 
     cd "$LOBSTER_DIR"
 
     if $DRY_RUN; then
-        info "[dry-run] Would update pip packages in venv"
+        info "[dry-run] Would sync venv from pyproject.toml/uv.lock (uv sync --all-extras --frozen)"
         return 0
     fi
 
@@ -591,32 +621,42 @@ update_python_deps() {
         success "venv created"
     fi
 
-    # Activate and update
-    # shellcheck source=/dev/null
-    source "$VENV_DIR/bin/activate"
-
-    substep "Upgrading pip..."
-    pip install --quiet --upgrade pip 2>/dev/null || true
-
-    # Install from requirements.txt if it exists, otherwise install known deps
-    if [ -f "$LOBSTER_DIR/requirements.txt" ]; then
-        substep "Installing from requirements.txt..."
-        pip install --quiet --upgrade -r "$LOBSTER_DIR/requirements.txt" 2>/dev/null || {
-            warn "requirements.txt install had errors, installing core deps individually..."
-            pip install --quiet --upgrade mcp python-telegram-bot watchdog python-dotenv 2>/dev/null || true
-        }
+    # pyproject.toml + uv.lock are the single source of truth for Python
+    # dependencies. A hand-maintained pip list here drifts from them in two
+    # ways: unversioned `pip install --upgrade` floats packages past their
+    # pins (against DEPENDENCY_NOTES.md), and optional extras such as `slack`
+    # and `browser` are silently left out when the venv is rebuilt. A bare
+    # `uv sync` has the second problem too: it installs no optional extras
+    # unless asked.
+    #
+    # --all-extras keeps every declared extra, including ones added later.
+    # --frozen installs exactly what uv.lock pins and never re-resolves.
+    # --inexact keeps packages uv.lock does not list (e.g. ones a skill
+    # installer added to this venv, or playwright on a --skip-playwright run):
+    # an upgrade realigns pinned packages but never uninstalls anything.
+    # If the frozen sync fails, fall through to the exact-pin pip set; never
+    # retry without --frozen, since that would re-resolve against the index.
+    if command -v uv &>/dev/null; then
+        local -a uv_args=(sync --all-extras --frozen --inexact --python "$VENV_DIR/bin/python" --quiet)
+        if $SKIP_PLAYWRIGHT; then
+            uv_args+=(--no-extra browser)
+        fi
+        local sync_log
+        sync_log=$(mktemp "${TMPDIR:-/tmp}/lobster-upgrade-uv-sync.XXXXXX")
+        substep "Syncing venv from uv.lock (uv sync --all-extras --frozen)..."
+        if UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv "${uv_args[@]}" >"$sync_log" 2>&1; then
+            success "venv synced from uv.lock (all extras)"
+        else
+            cat "$sync_log" >&2 || true
+            warn "uv sync --all-extras --frozen failed (output above); falling back to pinned pip install"
+            install_pinned_pip_fallback
+        fi
+        rm -f "$sync_log"
     else
-        substep "No requirements.txt found, installing core dependencies..."
-        pip install --quiet --upgrade mcp python-telegram-bot watchdog python-dotenv 2>/dev/null || true
+        warn "uv not found on PATH; installing the pinned pip fallback set (does not track new dependencies or extras in pyproject.toml)"
+        install_pinned_pip_fallback
     fi
 
-    # Always ensure playwright is importable (needed for fetch_page)
-    if ! $SKIP_PLAYWRIGHT; then
-        substep "Ensuring playwright is installed in venv..."
-        pip install --quiet --upgrade playwright 2>/dev/null || warn "Failed to pip install playwright"
-    fi
-
-    deactivate
     success "Python dependencies updated"
     log_to_file "Python dependencies updated"
 }
