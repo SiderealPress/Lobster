@@ -14,6 +14,12 @@
 #   2. Only fires if there isn't already a self-check in the inbox (no spam)
 #   3. Rate-limited: won't inject if last self-check was < 2 minutes ago
 #   4. Max inbox depth: won't inject if inbox already has 20+ messages (backpressure)
+#
+# Config (config.env):
+#   LOBSTER_SELF_CHECK_STATUS_PINGS=true   default; false or 0 turns the
+#       "status?" message off. Completion still reaches the dispatcher through
+#       write_result, so only turn this off where every subagent reports that
+#       way (the SubagentStop hook require-write-result.py enforces it).
 #===============================================================================
 
 set -e
@@ -27,7 +33,17 @@ if [ -f "$_LOBSTER_CONFIG" ]; then
         exit 0
     fi
 fi
-unset _LOBSTER_CONFIG _DEV_MODE
+
+# Status pings: "false" or "0" disables the status? message. Anything else,
+# including an unset key or a missing config.env, keeps the default (on).
+SELF_CHECK_STATUS_PINGS=true
+if [ -f "$_LOBSTER_CONFIG" ]; then
+    _PINGS=$(grep -m1 '^LOBSTER_SELF_CHECK_STATUS_PINGS=' "$_LOBSTER_CONFIG" 2>/dev/null | cut -d= -f2)
+    if [ "$_PINGS" = "false" ] || [ "$_PINGS" = "0" ]; then
+        SELF_CHECK_STATUS_PINGS=false
+    fi
+fi
+unset _LOBSTER_CONFIG _DEV_MODE _PINGS
 
 INBOX_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/inbox"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
@@ -115,6 +131,12 @@ PENDING_COUNT=$(sqlite3 "$MESSAGES_DIR/config/agent_sessions.db" \
 # do nothing. CLAUDE_COUNT is not reliable here because the dispatcher itself
 # is always running (count >= 1 even with no subagents).
 if [ "$PENDING_COUNT" -eq 0 ] 2>/dev/null; then
+    exit 0
+fi
+
+# Pings turned off: subagents are still running, but the dispatcher is not
+# woken for them. Exit before the message and the rate-limit timestamp.
+if [ "$SELF_CHECK_STATUS_PINGS" = "false" ]; then
     exit 0
 fi
 

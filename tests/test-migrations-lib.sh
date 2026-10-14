@@ -339,6 +339,21 @@ run_migrations
 occurrences=$(grep -c "^LOBSTER_SPAWN_FRONTMATTER_MODE=" "$CONFIG_FILE")
 assert_count "Migration 102 is idempotent (running twice does not duplicate the key)" "1" "$occurrences"
 
+assert_file_contains "Migration 103 applies LOBSTER_SELF_CHECK_STATUS_PINGS=true to config.env" \
+    "$CONFIG_FILE" "LOBSTER_SELF_CHECK_STATUS_PINGS=true"
+
+run_migrations
+occurrences=$(grep -c "^LOBSTER_SELF_CHECK_STATUS_PINGS=" "$CONFIG_FILE")
+assert_count "Migration 103 is idempotent (running twice does not duplicate the key)" "1" "$occurrences"
+
+# An operator who turned the pings off must keep that choice across upgrades.
+sed -i 's/^LOBSTER_SELF_CHECK_STATUS_PINGS=.*/LOBSTER_SELF_CHECK_STATUS_PINGS=false/' "$CONFIG_FILE"
+run_migrations
+assert_count "Migration 103 keeps an existing LOBSTER_SELF_CHECK_STATUS_PINGS=false" "1" \
+    "$(grep -c '^LOBSTER_SELF_CHECK_STATUS_PINGS=false$' "$CONFIG_FILE")"
+assert_count "Migration 103 does not add a second key when the value is false" "1" \
+    "$(grep -c '^LOBSTER_SELF_CHECK_STATUS_PINGS=' "$CONFIG_FILE")"
+
 #===============================================================================
 # Group 1c: Migration 101 — lobster-inbox MCP idle timeout in ~/.claude.json
 # (issue #2208)
