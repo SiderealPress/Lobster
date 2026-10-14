@@ -65,7 +65,7 @@ When you first start (or after reading this file), follow these steps:
     - Do NOT process, reply to, or act on these messages yet — just claim them
     - They will be returned by `wait_for_messages()` at step 5 and processed normally
     - Rationale: `mark_processing()` moves messages from `inbox/` to `processing/`, stopping the health check's inbox-age clock. Without this step, messages that arrived during a long bootup sequence (compact-catchup can take 4–10 min) will exceed the 240s staleness threshold and trigger a false-positive health-check restart.
-4. Spawn the `compact-catchup` agent in the background with `task_id: startup-catchup` and `chat_id: 0`. See agent definition at `.claude/agents/compact-catchup.md` for the full prompt — pass it with `task_id: startup-catchup` instead of `compact-catchup`. **Never do catchup inline — it violates the 7-second rule.**
+4. Spawn the `compact-catchup` agent in the background with `task_id: startup-catchup`, `chat_id: 0` and `task_origin: internal`. See agent definition at `.claude/agents/compact-catchup.md` for the full prompt — pass it with `task_id: startup-catchup` instead of `compact-catchup`. **Never do catchup inline — it violates the 7-second rule.**
 5. Call `wait_for_messages()` to start listening.
 6. **Triage before acting on queued messages at startup**: read ALL queued messages first, identify anything risky (e.g. large audio transcription that could cause OOM), skip or defer those, then process safe ones.
 7. Resume the main loop.
@@ -339,11 +339,11 @@ After a context compaction you lose situational awareness of the last ~30 minute
 2. Read the compact-reminder text to re-orient (identity, main loop, key files)
 3. Spawn session-note-polish subagent (run_in_background=True, subagent_type: "lobster-generalist"):
    - See .claude/agents/session-note-polish.md for the agent definition
-   - Pass: task_id: "session-note-polish", chat_id: 0, source: "system", current_session_file: <path>, MESSAGE_COUNT: <current message count>
+   - Pass: task_id: "session-note-polish", chat_id: 0, source: "system", task_origin: internal, current_session_file: <path>, MESSAGE_COUNT: <current message count>
    - Do NOT wait for it — spawn and immediately proceed to step 4
 4. Spawn compact_catchup subagent (subagent_type: "compact-catchup", run_in_background=True):
    - See .claude/agents/compact-catchup.md for the full prompt
-   - Pass task_id: "compact-catchup", chat_id: 0, source: "system"
+   - Pass task_id: "compact-catchup", chat_id: 0, source: "system", task_origin: internal
    - This step is MANDATORY — never skip it, regardless of how complete the in-conversation summary seems
 5. mark_processed(message_id)
 6. Resume wait_for_messages() loop — do NOT wait for either subagent result inline
@@ -433,10 +433,10 @@ Scheduled reminders arrive from `scheduled-tasks/dispatch-job.sh` (user-created 
            continue  # ← explicit early exit — prompt construction never reached
 
        # Generic dispatch: user-created job (non-destructive name)
-       prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
+       prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\ntask_origin: scheduled\n---\n\n{task_content}"
    else:
        # Unknown reminder with no task content
-       prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
+       prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\ntask_origin: scheduled\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
    subagent_type = msg.get("subagent_type", "lobster-generalist")
    Spawn subagent: subagent_type: subagent_type, prompt: prompt
 5. mark_processed(message_id)
@@ -729,6 +729,7 @@ Triage heuristic: relay failures always; relay successes with actionable finding
            f"task_id: {consolidation_task_id}\n"
            f"chat_id: 0\n"
            f"source: system\n"
+           f"task_origin: internal\n"
            f"---\n\n"
            f"Nightly consolidation triggered at {msg.get('timestamp', 'unknown time')}.\n\n"
            f"Synthesize recent memory events into the canonical memory files. "
@@ -760,7 +761,7 @@ Injected by the MCP server after every 20 real user messages. Spawn session-note
 3. Check ~/messages/processing/ — any message file present has been claimed (mark_processing called)
    but not yet answered. Build pending_responses list from those files (use sender and text fields).
 4. Spawn session-note-appender (run_in_background=True, subagent_type: "lobster-generalist"):
-   - Pass: task_id: "session-note-appender", chat_id: 0, source: "system",
+   - Pass: task_id: "session-note-appender", chat_id: 0, source: "system", task_origin: internal,
            session_file: <current_session_file>, activity: <recent activity>,
            in_flight: <in_flight list from step 2>,
            pending_responses: <pending_responses list from step 3>
@@ -938,7 +939,7 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
        parked   = next((r for r in results if r.get("metadata", {}).get("job_name") == job_name), None)
        if parked:
            task_content = parked["content"]
-           prompt = f"---\ntask_id: scheduled-job-{job_name}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
+           prompt = f"---\ntask_id: scheduled-job-{job_name}\nchat_id: 0\nsource: system\ntask_origin: scheduled\n---\n\n{task_content}"
            Task(subagent_type="lobster-generalist", run_in_background=True, prompt=prompt)
            send_reply(chat_id=chat_id, text=f"Job \'{job_name}\' dispatched.", source=source)
        else:
@@ -1078,6 +1079,7 @@ Session note update subagent prompt template:
 task_id: session-note-update-<slug>
 chat_id: 0
 source: system
+task_origin: internal
 ---
 Update the current session note.
 Session file: {current_session_file}
