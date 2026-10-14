@@ -379,3 +379,110 @@ class TestStartupSweepSkipsNotifiedSessions:
             "Completed session with notified_at=NULL must appear in startup sweep — "
             "this is the bug that caused the April 4 flood"
         )
+
+
+# ---------------------------------------------------------------------------
+# Reused task_id: write_result must only mark the session that is finishing
+# ---------------------------------------------------------------------------
+
+# A task_id that is legitimately reused across spawns (agent definitions with a
+# hardcoded task_id, scheduled jobs with a stable id).
+REUSED_TASK_ID = "fixed-id"
+HISTORICAL_NOTIFIED_AT = "2000-01-01T00:00:00+00:00"
+
+
+def _seed_session(store, db_path: Path, *, id: str, task_id: str, spawned_at: str,
+                  status: str = "running", notified_at: str | None = None) -> None:
+    """Insert a session row and pin its spawned_at / status / notified_at."""
+    store.session_start(
+        id=id,
+        task_id=task_id,
+        description="fixture session",
+        chat_id="1000001",
+        source="telegram",
+        path=db_path,
+    )
+    conn = store._get_connection(db_path)
+    conn.execute(
+        "UPDATE agent_sessions SET spawned_at = ?, status = ?, notified_at = ? WHERE id = ?",
+        (spawned_at, status, notified_at, id),
+    )
+    conn.commit()
+
+
+def _row(store, db_path: Path, id: str) -> dict:
+    conn = store._get_connection(db_path)
+    return dict(conn.execute("SELECT * FROM agent_sessions WHERE id = ?", (id,)).fetchone())
+
+
+class TestReusedTaskIdScope:
+    """A repeated task_id must not rewrite notified_at on historical rows."""
+
+    def test_bare_task_id_does_not_rewrite_completed_row(self, tmp_path):
+        """write_result(task_id=X) leaves an older, already-notified row with
+        task_id=X untouched and marks only the newer running row."""
+        import src.mcp.inbox_server as srv
+        store = srv._session_store
+
+        inbox, outbox, sent, sent_replies = _make_dirs(tmp_path)
+        db_path = tmp_path / "agent_sessions.db"
+        store.init_db(db_path)
+
+        _seed_session(store, db_path, id="agent-fixture-old", task_id=REUSED_TASK_ID,
+                      spawned_at="2000-01-01T00:00:00+00:00", status="completed",
+                      notified_at=HISTORICAL_NOTIFIED_AT)
+        _seed_session(store, db_path, id="agent-fixture-new", task_id=REUSED_TASK_ID,
+                      spawned_at="2000-01-02T00:00:00+00:00", status="running")
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            OUTBOX_DIR=outbox,
+            SENT_DIR=sent,
+            SENT_REPLIES_DIR=sent_replies,
+        ), patch.object(store, "_DEFAULT_DB_PATH", db_path):
+            asyncio.run(srv.handle_write_result({
+                "task_id": REUSED_TASK_ID,
+                "chat_id": 1000001,
+                "text": "Done.",
+                "source": "telegram",
+            }))
+
+        old = _row(store, db_path, "agent-fixture-old")
+        new = _row(store, db_path, "agent-fixture-new")
+        assert old["notified_at"] == HISTORICAL_NOTIFIED_AT, (
+            "write_result must not rewrite notified_at on a historical row sharing the task_id"
+        )
+        assert new["status"] == "completed"
+        assert new["notified_at"] is not None, "the finishing session must be marked notified"
+
+    def test_session_end_zero_rows_warns(self, tmp_path, caplog):
+        """write_result for a task_id that matches no running row logs a WARNING
+        naming the task_id instead of silently no-op'ing."""
+        import logging
+        import src.mcp.inbox_server as srv
+        store = srv._session_store
+
+        inbox, outbox, sent, sent_replies = _make_dirs(tmp_path)
+        db_path = tmp_path / "agent_sessions.db"
+        store.init_db(db_path)
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            OUTBOX_DIR=outbox,
+            SENT_DIR=sent,
+            SENT_REPLIES_DIR=sent_replies,
+        ), patch.object(store, "_DEFAULT_DB_PATH", db_path), \
+                caplog.at_level(logging.WARNING):
+            asyncio.run(srv.handle_write_result({
+                "task_id": "unmatched-fixture-id",
+                "chat_id": 1000001,
+                "text": "Done.",
+                "source": "telegram",
+            }))
+
+        warnings = [r for r in caplog.records
+                    if r.levelno == logging.WARNING and "unmatched-fixture-id" in r.getMessage()]
+        assert warnings, "a WARNING naming the unmatched task_id must be logged"
+

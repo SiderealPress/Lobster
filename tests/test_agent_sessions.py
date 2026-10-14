@@ -1256,3 +1256,79 @@ def test_cleanup_stale_running_zero_pid_rows_unaffected(isolated_db):
     assert result["status"] == "dead"
     assert result["pid"] is None
     assert result["dispatcher_pid"] is None
+
+
+# ---------------------------------------------------------------------------
+# Test: set_notified scope with a reused task_id
+# ---------------------------------------------------------------------------
+
+# task_ids are legitimately reused across spawns (fixed ids in agent
+# definitions, stable ids for scheduled jobs), so one task_id can match many rows.
+REUSED_TASK_ID = "fixed-id"
+HISTORICAL_NOTIFIED_AT = "2000-01-01T00:00:00+00:00"
+
+
+def _seed(db, id, task_id, spawned_at, status="running", notified_at=None):
+    session_store.session_start(
+        id=id, task_id=task_id, description="fixture session",
+        chat_id="1000001", path=db,
+    )
+    conn = session_store._get_connection(db)
+    conn.execute(
+        "UPDATE agent_sessions SET spawned_at = ?, status = ?, notified_at = ? WHERE id = ?",
+        (spawned_at, status, notified_at, id),
+    )
+    conn.commit()
+
+
+def _notified_at(db, id):
+    conn = session_store._get_connection(db)
+    return conn.execute(
+        "SELECT notified_at FROM agent_sessions WHERE id = ?", (id,)
+    ).fetchone()["notified_at"]
+
+
+def test_set_notified_does_not_rewrite_already_notified_row(isolated_db):
+    """A row whose notified_at is already set keeps its original timestamp."""
+    db = isolated_db
+    _seed(db, "agent-fixture-a", REUSED_TASK_ID, "2000-01-01T00:00:00+00:00",
+          status="completed", notified_at=HISTORICAL_NOTIFIED_AT)
+
+    session_store.set_notified(REUSED_TASK_ID, path=db)
+
+    assert _notified_at(db, "agent-fixture-a") == HISTORICAL_NOTIFIED_AT
+
+
+def test_set_notified_marks_only_most_recent_unnotified_row(isolated_db):
+    """With several unnotified rows sharing a task_id, only the newest is marked;
+    older ones stay visible to get_unnotified_completed()."""
+    db = isolated_db
+    _seed(db, "agent-fixture-a", REUSED_TASK_ID, "2000-01-01T00:00:00+00:00", status="dead")
+    _seed(db, "agent-fixture-b", REUSED_TASK_ID, "2000-01-02T00:00:00+00:00", status="completed")
+
+    session_store.set_notified(REUSED_TASK_ID, path=db)
+
+    assert _notified_at(db, "agent-fixture-a") is None
+    assert _notified_at(db, "agent-fixture-b") is not None
+
+
+def test_set_notified_by_session_id_marks_that_row(isolated_db):
+    """Reconciler callers pass the session id; an exact id match wins over a
+    newer row that merely shares the task_id."""
+    db = isolated_db
+    _seed(db, "agent-fixture-a", REUSED_TASK_ID, "2000-01-01T00:00:00+00:00", status="dead")
+    _seed(db, "agent-fixture-b", REUSED_TASK_ID, "2000-01-02T00:00:00+00:00", status="completed")
+
+    session_store.set_notified("agent-fixture-a", path=db)
+
+    assert _notified_at(db, "agent-fixture-a") is not None
+    assert _notified_at(db, "agent-fixture-b") is None
+
+
+def test_session_end_returns_affected_row_count(isolated_db):
+    """session_end reports how many rows it closed so callers can detect a miss."""
+    db = isolated_db
+    _seed(db, "agent-fixture-a", "catchup-fixture-a", "2000-01-01T00:00:00+00:00")
+
+    assert session_store.session_end("no-such-fixture", "completed", path=db) == 0
+    assert session_store.session_end("catchup-fixture-a", "completed", path=db) == 1

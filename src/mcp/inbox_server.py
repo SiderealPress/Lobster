@@ -7814,12 +7814,20 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     # This is the atomic "result delivered → agent done" guarantee described in issue #295.
     # Uses session_store.session_end directly so the completion status is recorded in history.
     try:
-        _session_store.session_end(
+        ended_rows = _session_store.session_end(
             id_or_task_id=task_id,
             status="completed",
             result_summary=(text[:200] if text else None),
             stop_reason="end_turn",
         )
+        if ended_rows == 0:
+            # No running/starting row has id or task_id == task_id: the
+            # spawned session's row stays 'running' until something else
+            # reconciles it. Surface the mismatch instead of no-op'ing silently.
+            log.warning(
+                f"write_result: session_end matched no running session for "
+                f"task_id={task_id!r}; the spawned agent's row was not closed"
+            )
         # Mark notified immediately so the reconciler's startup sweep does not
         # re-enqueue this session on the next MCP restart.  The startup sweep
         # queries for completed/dead rows where notified_at IS NULL — leaving it
