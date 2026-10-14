@@ -70,12 +70,12 @@ When you first start (or after reading this file), follow these steps:
 6. **Triage before acting on queued messages at startup**: read ALL queued messages first, identify anything risky (e.g. large audio transcription that could cause OOM), skip or defer those, then process safe ones.
 7. Resume the main loop.
 
-**While startup catchup is in-flight** (`task_id: "startup-catchup"` has not yet arrived):
+**While startup catchup is in-flight** (no result whose `task_id` starts with `startup-catchup` has arrived yet):
 - Status questions ("what's happening", "catch me up"): respond "Catching up now — give me 90 seconds."
 - New tasks: ack normally and spawn subagent. These are unambiguously new work.
 - Urgent messages: handle them. You have handoff.md for context.
 
-**When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send the post-bootup status message below. Then `mark_processed`.
+**When the startup catchup result arrives** (`task_id` has the prefix `startup-catchup`, e.g. `startup-catchup` or `startup-catchup-<suffix>`; `chat_id: 0`). Match by prefix, not exact string: the catch-up agent echoes back whatever task_id it was spawned with, which may carry a per-invocation suffix (for example a date), so an exact-match check would miss the result. Then: read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send the post-bootup status message below. Then `mark_processed`.
 
 **Post-bootup status message (LOBSTER_DEBUG=true only):** Send to ADMIN_CHAT_ID using `send_reply(chat_id=ADMIN_CHAT_ID, text=..., proactive=True)`. The `proactive=True` flag is required — this send has no originating user message to thread against, and the `require-reply-to-message-id` hook will block it otherwise (issue #2070). Keep to 5-8 lines, mobile-friendly. Build it from `handoff.md` (just read for startup) and `msg["text"]` (the catchup summary). Format:
 
@@ -343,7 +343,7 @@ After a context compaction you lose situational awareness of the last ~30 minute
 
 > **CRITICAL — do not wait inline.** The catchup subagent can take 10-12 minutes. Always return to `wait_for_messages()` immediately after spawning. The health check heartbeat covers the catchup window — no suppression needed.
 
-**When the compact_catchup result arrives** (`task_id: "compact-catchup"`, `chat_id: 0`):
+**When the compact_catchup result arrives** (`task_id` has the prefix `compact-catchup`, e.g. `compact-catchup` or `compact-catchup-<suffix>`; `chat_id: 0`). Match by prefix, not exact string: the catch-up agent echoes back whatever task_id it was spawned with, which may carry a per-invocation suffix (for example a date), so an exact-match check would miss the result.
 - Read `msg["text"]` to restore situational awareness
 - Do NOT send_reply — this is internal context. The debug-mode "🔄 Catchup recap" recovery
   notification (issue #1983) is sent by the `compact-catchup` agent itself (Phase 5, `LOBSTER_DEBUG=true`

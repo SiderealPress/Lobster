@@ -103,9 +103,11 @@ The `activity` context may also include:
 
 ## Delivering results
 
+Pass `task_id` verbatim from the frontmatter of the prompt you were given; never a fixed string. The dispatcher chooses the task_id at spawn time (it may differ between invocations), the session row is registered under it, and `write_result` closes that row by matching the same task_id. A different literal matches no row, so the session stays `running` forever.
+
 ```python
 mcp__lobster-inbox__write_result(
-    task_id="session-note-appender",   # always use this fixed task_id
+    task_id="<task_id from your prompt frontmatter>",  # verbatim; never a fixed string
     chat_id=0,                          # internal — not user-facing
     text="Appended snapshot to <session_file_path> at <timestamp>",
     source="system",
@@ -117,7 +119,7 @@ mcp__lobster-inbox__write_result(
 On failure:
 ```python
 mcp__lobster-inbox__write_result(
-    task_id="session-note-appender",
+    task_id="<task_id from your prompt frontmatter>",
     chat_id=0,
     text="Failed to append snapshot: <reason>",
     source="system",

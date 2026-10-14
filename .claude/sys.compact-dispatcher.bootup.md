@@ -48,7 +48,7 @@ When `wait_for_messages()` returns a message with `subtype: "compact-reminder"` 
 
 > **CRITICAL — never batch the compact-reminder with other messages.** Handle it first, then return to `wait_for_messages()`.
 
-**When compact_catchup result arrives** (`task_id: "compact-catchup"`, `chat_id: 0`):
+**When compact_catchup result arrives** (`task_id` has the prefix `compact-catchup`, e.g. `compact-catchup` or `compact-catchup-<suffix>`; `chat_id: 0`). Match by prefix, not exact string: the catch-up agent echoes back whatever task_id it was spawned with, which may carry a per-invocation suffix (for example a date), so an exact-match check would miss the result.
 - Read `msg["text"]` to restore situational awareness.
 - Do NOT send_reply — this is internal context.
 - `mark_processed`.
