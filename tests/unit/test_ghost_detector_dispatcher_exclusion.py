@@ -193,6 +193,39 @@ class TestLoadRunningAgentsExcludesDispatcher:
 
         assert [r.agent_id for r in rows] == ["legacy-row"]
 
+    def test_dispatcher_row_with_null_agent_type_still_excluded(self, tmp_path: Path) -> None:
+        """Issue #2226: the dispatcher's own row must be excluded even when
+        agent_type is NULL (session_start()'s agent_type param is optional;
+        the dispatcher's bootup call can omit it).
+
+        Distinguishes from test_null_agent_type_row_still_included() above by
+        agent_id: 'legacy-row' (a real, non-dispatcher row with no agent_type
+        set) must still be returned, but 'lobster-dispatcher' with the same
+        NULL agent_type must not — the id fallback in DISPATCHER_EXCLUSION_SQL
+        is what tells them apart.
+        """
+        db_path = tmp_path / "agent_sessions.db"
+        _make_agent_sessions_db(db_path)
+
+        _insert_row(
+            db_path,
+            agent_id="lobster-dispatcher",
+            agent_type=None,
+            spawned_at=(NOW - timedelta(minutes=1)).isoformat(),
+            description="Lobster dispatcher main loop",
+        )
+        _insert_row(
+            db_path,
+            agent_id="real-subagent-001",
+            agent_type="subagent",
+            spawned_at=(NOW - timedelta(minutes=5)).isoformat(),
+            output_file="/tmp/real-subagent-001.output",
+        )
+
+        rows = gd.load_running_agents(db_path)
+
+        assert [r.agent_id for r in rows] == ["real-subagent-001"]
+
 
 class TestFullPipelineDispatcherRaceReproduction:
     """End-to-end reproduction of the restart race through the same sequence
