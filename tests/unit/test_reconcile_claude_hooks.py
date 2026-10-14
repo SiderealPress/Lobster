@@ -13,8 +13,8 @@ completely unwired on a running instance, so spawned agents left zero trace
 the moment anything went wrong — the "disappearing agent" bug.
 
 `scripts/reconcile-claude-hooks.py` must:
-- Detect when a critical hook (starting with auto-register-agent) is missing
-  from settings.json's PostToolUse block
+- Detect when a critical hook (auto-register-agent on PostToolUse,
+  require-write-result on SubagentStop, ...) is missing from settings.json
 - Repair it by appending the canonical hook entry, atomically, idempotently
 - Never duplicate an entry that is already present
 - Never touch or remove unrelated existing hooks/settings
@@ -29,6 +29,8 @@ the moment anything went wrong — the "disappearing agent" bug.
 CRITICAL_HOOK_NAME = "auto-register-agent"
 CRITICAL_HOOK_EVENT = "PostToolUse"
 CRITICAL_HOOK_COMMAND_MATCH = "auto-register-agent"
+REQUIRE_WRITE_RESULT_NAME = "require-write-result"
+SUBAGENT_STOP_EVENT = "SubagentStop"
 EXIT_NOOP = 0
 EXIT_REPAIRED = 1
 EXIT_FATAL = 2
@@ -52,6 +54,24 @@ import pytest
 CRITICAL_HOOK_NAME = "auto-register-agent"
 CRITICAL_HOOK_EVENT = "PostToolUse"
 CRITICAL_HOOK_COMMAND_MATCH = "auto-register-agent"
+# require-write-result (issue #2285): install.sh's setup_claude_hooks()
+# registers it under SubagentStop with matcher "" and timeout 10. Without it,
+# write_result enforcement and the inflight "done" bookkeeping never run, and
+# nothing reports the absence.
+REQUIRE_WRITE_RESULT_NAME = "require-write-result"
+SUBAGENT_STOP_EVENT = "SubagentStop"
+REQUIRE_WRITE_RESULT_TIMEOUT = 10
+EMPTY_MATCHER = ""
+
+# SessionStart hooks (issue #2285): install.sh registers write-dispatcher-session-id
+# (timeout 5) before on-compact (timeout 30), both with matcher "". Role
+# detection must run before any hook that asks "is this the dispatcher?".
+SESSION_START_EVENT = "SessionStart"
+WRITE_DISPATCHER_SESSION_ID_NAME = "write-dispatcher-session-id"
+WRITE_DISPATCHER_SESSION_ID_TIMEOUT = 5
+ON_COMPACT_NAME = "on-compact"
+ON_COMPACT_TIMEOUT = 30
+
 EXIT_NOOP = 0
 EXIT_REPAIRED = 1
 EXIT_FATAL = 2
@@ -73,6 +93,26 @@ def _load_module():
 _mod = _load_module()
 hook_present = _mod.hook_present
 reconcile = _mod.reconcile
+
+
+def _canonical_by_name(install_dir: Path) -> dict[str, dict]:
+    return {h["name"]: h for h in _mod._canonical_critical_hooks(install_dir)}
+
+
+def _fully_wired_settings(install_dir: Path) -> dict:
+    """A settings dict that already contains every canonical critical hook."""
+    hooks: dict[str, list] = {}
+    for h in _mod._canonical_critical_hooks(install_dir):
+        hooks.setdefault(h["event"], []).append(h["entry"])
+    return {"hooks": hooks}
+
+
+def _commands(settings: dict, event: str) -> list[str]:
+    return [
+        h.get("command", "")
+        for e in settings.get("hooks", {}).get(event, [])
+        for h in e.get("hooks", [])
+    ]
 
 
 def _run_script(settings_path: Path, install_dir: Path, messages_dir: Path) -> subprocess.CompletedProcess:
@@ -136,12 +176,12 @@ class TestReconcile:
         settings = {"hooks": {}}
         canonical = _mod._canonical_critical_hooks(Path("/opt/lobster"))
         new_settings, repaired = reconcile(settings, canonical)
-        assert repaired == [CRITICAL_HOOK_NAME]
+        assert CRITICAL_HOOK_NAME in repaired
         assert hook_present(new_settings, CRITICAL_HOOK_EVENT, CRITICAL_HOOK_COMMAND_MATCH) is True
 
     def test_noop_when_already_present(self) -> None:
         canonical = _mod._canonical_critical_hooks(Path("/opt/lobster"))
-        settings = {"hooks": {CRITICAL_HOOK_EVENT: [canonical[0]["entry"]]}}
+        settings = _fully_wired_settings(Path("/opt/lobster"))
         new_settings, repaired = reconcile(settings, canonical)
         assert repaired == []
         # Only one entry present — reconcile must not duplicate it.
@@ -165,7 +205,7 @@ class TestReconcile:
         }
         canonical = _mod._canonical_critical_hooks(Path("/opt/lobster"))
         new_settings, repaired = reconcile(settings, canonical)
-        assert repaired == [CRITICAL_HOOK_NAME]
+        assert CRITICAL_HOOK_NAME in repaired
         # Unrelated hooks and top-level keys untouched.
         assert new_settings["hooks"]["PreToolUse"] == settings["hooks"]["PreToolUse"]
         assert new_settings["env"] == {"LOBSTER_DEBUG": "true"}
@@ -183,6 +223,143 @@ class TestReconcile:
         canonical = _mod._canonical_critical_hooks(Path("/opt/lobster"))
         reconcile(settings, canonical)
         assert settings == {"hooks": {}}, "reconcile() must not mutate its input"
+
+
+class TestRequireWriteResultCanonical:
+    """Issue #2285: require-write-result must be healed like auto-register-agent."""
+
+    def test_canonical_includes_require_write_result(self) -> None:
+        install_dir = Path("/opt/lobster")
+        hook = _canonical_by_name(install_dir).get(REQUIRE_WRITE_RESULT_NAME)
+        assert hook is not None, "require-write-result missing from the canonical list"
+        assert hook["event"] == SUBAGENT_STOP_EVENT
+        assert hook["command_match"] == REQUIRE_WRITE_RESULT_NAME
+        assert hook["entry"]["matcher"] == EMPTY_MATCHER
+        (inner,) = hook["entry"]["hooks"]
+        assert inner["type"] == "command"
+        assert inner["command"] == f"python3 {install_dir}/hooks/require-write-result.py"
+        assert inner["timeout"] == REQUIRE_WRITE_RESULT_TIMEOUT
+
+    def test_repairs_missing_subagentstop_entry(self) -> None:
+        """A settings.json with no SubagentStop list at all gets the entry appended."""
+        install_dir = Path("/opt/lobster")
+        canonical = _mod._canonical_critical_hooks(install_dir)
+        expected_entry = _canonical_by_name(install_dir)[REQUIRE_WRITE_RESULT_NAME]["entry"]
+        settings = {"hooks": {"PostToolUse": []}}
+
+        new_settings, repaired = reconcile(settings, canonical)
+
+        assert REQUIRE_WRITE_RESULT_NAME in repaired
+        assert new_settings["hooks"][SUBAGENT_STOP_EVENT] == [expected_entry]
+
+    def test_repairs_when_subagentstop_holds_only_an_unrelated_empty_matcher_entry(self) -> None:
+        """Another SubagentStop hook with matcher "" must not mask the missing one."""
+        install_dir = Path("/opt/lobster")
+        canonical = _mod._canonical_critical_hooks(install_dir)
+        unrelated = {
+            "matcher": EMPTY_MATCHER,
+            "hooks": [{"type": "command", "command": "python3 /x/hooks/require-auditor-context-update.py"}],
+        }
+        settings = {"hooks": {SUBAGENT_STOP_EVENT: [unrelated]}}
+
+        new_settings, repaired = reconcile(settings, canonical)
+
+        assert REQUIRE_WRITE_RESULT_NAME in repaired
+        commands = _commands(new_settings, SUBAGENT_STOP_EVENT)
+        assert new_settings["hooks"][SUBAGENT_STOP_EVENT][0] == unrelated
+        assert any(REQUIRE_WRITE_RESULT_NAME in c for c in commands)
+
+    def test_existing_subagentstop_entry_is_untouched(self) -> None:
+        """An already-registered require-write-result entry (any path/timeout) is left as-is."""
+        install_dir = Path("/opt/lobster")
+        canonical = _mod._canonical_critical_hooks(install_dir)
+        existing = {
+            "matcher": EMPTY_MATCHER,
+            "hooks": [{"type": "command", "command": "python3 /srv/other/hooks/require-write-result.py", "timeout": 20}],
+        }
+        settings = _fully_wired_settings(install_dir)
+        settings["hooks"][SUBAGENT_STOP_EVENT] = [existing]
+
+        new_settings, repaired = reconcile(settings, canonical)
+
+        assert REQUIRE_WRITE_RESULT_NAME not in repaired
+        assert new_settings["hooks"][SUBAGENT_STOP_EVENT] == [existing]
+
+
+class TestSessionStartCanonical:
+    """Issue #2285: the two SessionStart hooks whose absence fails silently."""
+
+    @pytest.mark.parametrize(
+        "name, timeout",
+        [
+            (WRITE_DISPATCHER_SESSION_ID_NAME, WRITE_DISPATCHER_SESSION_ID_TIMEOUT),
+            (ON_COMPACT_NAME, ON_COMPACT_TIMEOUT),
+        ],
+    )
+    def test_canonical_includes_session_start_hooks(self, name: str, timeout: int) -> None:
+        install_dir = Path("/opt/lobster")
+        hook = _canonical_by_name(install_dir).get(name)
+        assert hook is not None, f"{name} missing from the canonical list"
+        assert hook["event"] == SESSION_START_EVENT
+        assert hook["command_match"] == name
+        # matcher "" for both: on-compact self-gates on source == "compact"
+        # because matcher "compact" fires unreliably (issue #1947).
+        assert hook["entry"]["matcher"] == EMPTY_MATCHER
+        (inner,) = hook["entry"]["hooks"]
+        assert inner["command"] == f"python3 {install_dir}/hooks/{name}.py"
+        assert inner["timeout"] == timeout
+
+    def test_session_start_hooks_repaired_in_role_detection_order(self) -> None:
+        """write-dispatcher-session-id must be appended before on-compact."""
+        canonical = _mod._canonical_critical_hooks(Path("/opt/lobster"))
+        new_settings, repaired = reconcile({"hooks": {}}, canonical)
+
+        assert repaired.index(WRITE_DISPATCHER_SESSION_ID_NAME) < repaired.index(ON_COMPACT_NAME)
+        commands = _commands(new_settings, SESSION_START_EVENT)
+        first = next(i for i, c in enumerate(commands) if WRITE_DISPATCHER_SESSION_ID_NAME in c)
+        second = next(i for i, c in enumerate(commands) if ON_COMPACT_NAME in c)
+        assert first < second
+
+    def test_legacy_compact_matcher_on_compact_entry_is_not_duplicated(self) -> None:
+        """An on-compact entry still on matcher "compact" counts as present.
+
+        Converting its matcher is Migration 88's job; the reconciler only
+        heals absence and must not add a second on-compact entry.
+        """
+        install_dir = Path("/opt/lobster")
+        canonical = _mod._canonical_critical_hooks(install_dir)
+        legacy = {
+            "matcher": "compact",
+            "hooks": [{"type": "command", "command": f"python3 {install_dir}/hooks/on-compact.py", "timeout": 30}],
+        }
+        settings = _fully_wired_settings(install_dir)
+        settings["hooks"][SESSION_START_EVENT] = [
+            e for e in settings["hooks"][SESSION_START_EVENT]
+            if ON_COMPACT_NAME not in e["hooks"][0]["command"]
+        ] + [legacy]
+
+        new_settings, repaired = reconcile(settings, canonical)
+
+        assert repaired == []
+        on_compact = [c for c in _commands(new_settings, SESSION_START_EVENT) if ON_COMPACT_NAME in c]
+        assert len(on_compact) == 1
+
+    def test_on_compact_repaired_when_only_another_compact_matcher_entry_exists(self) -> None:
+        """A different hook on matcher "compact" must not mask a missing on-compact."""
+        install_dir = Path("/opt/lobster")
+        canonical = _mod._canonical_critical_hooks(install_dir)
+        settings = _fully_wired_settings(install_dir)
+        settings["hooks"][SESSION_START_EVENT] = [
+            e for e in settings["hooks"][SESSION_START_EVENT]
+            if ON_COMPACT_NAME not in e["hooks"][0]["command"]
+        ] + [{
+            "matcher": "compact",
+            "hooks": [{"type": "command", "command": f"python3 {install_dir}/hooks/inject-bootup-context.py", "timeout": 10}],
+        }]
+
+        _new_settings, repaired = reconcile(settings, canonical)
+
+        assert repaired == [ON_COMPACT_NAME]
 
 
 # ---------------------------------------------------------------------------
@@ -214,10 +391,7 @@ class TestScriptEndToEnd:
         settings_path = tmp_path / "settings.json"
         install_dir = tmp_path / "lobster"
         messages_dir = tmp_path / "messages"
-        canonical = _mod._canonical_critical_hooks(install_dir)
-        settings_path.write_text(
-            json.dumps({"hooks": {CRITICAL_HOOK_EVENT: [canonical[0]["entry"]]}})
-        )
+        settings_path.write_text(json.dumps(_fully_wired_settings(install_dir)))
 
         result = _run_script(settings_path, install_dir, messages_dir)
 
@@ -290,10 +464,7 @@ class TestScriptEndToEnd:
         install_dir = tmp_path / "lobster"
         messages_dir = tmp_path / "messages"
         (messages_dir / "inbox").mkdir(parents=True, exist_ok=True)
-        canonical = _mod._canonical_critical_hooks(install_dir)
-        settings_path.write_text(
-            json.dumps({"hooks": {CRITICAL_HOOK_EVENT: [canonical[0]["entry"]]}})
-        )
+        settings_path.write_text(json.dumps(_fully_wired_settings(install_dir)))
 
         _run_script(settings_path, install_dir, messages_dir)
 

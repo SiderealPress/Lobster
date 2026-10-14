@@ -270,8 +270,8 @@ check_hook "setup_claude_hooks: dispatcher-state-posttool (PostToolUse) [previou
 # Test 13: SessionStart hooks (unit)
 check_hook "setup_claude_hooks: inject-bootup-context all-sessions (SessionStart)" \
     '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "")'
-check_hook "setup_claude_hooks: on-compact (SessionStart)" \
-    '.hooks.SessionStart[]? | select(.matcher == "compact") | select(.hooks[]?.command | contains("on-compact"))'
+check_hook "setup_claude_hooks: on-compact (SessionStart, matcher='' — issues #1947, #2285)" \
+    '.hooks.SessionStart[]? | select(.matcher == "") | select(.hooks[]?.command | contains("on-compact"))'
 check_hook "setup_claude_hooks: inject-bootup-context compact (SessionStart)" \
     '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "compact")'
 

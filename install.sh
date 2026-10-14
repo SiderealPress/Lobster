@@ -587,8 +587,11 @@ HOOKEOF
 
     # ── SessionStart ────────────────────────────────────────────────────────────
 
-    # Dispatcher detection uses the startup flag written by claude-persistent.sh (issue #1908);
-    # write-dispatcher-session-id.py hook is no longer needed and has been removed.
+    # write-dispatcher-session-id.py is registered by the top-level SessionStart block
+    # further down (full install path) and healed by scripts/reconcile-claude-hooks.py on
+    # every dispatcher SessionStart. SessionStart hooks detect the dispatcher via the
+    # launcher-written startup flag (issue #1908); this hook then writes the session-id
+    # marker that Stop/PreToolUse hooks read (see docs/engineering-lessons-learned.md).
 
     # Inject bootup context on all fresh sessions
     chmod +x "$INSTALL_DIR/hooks/inject-bootup-context.py" 2>/dev/null || true
@@ -603,12 +606,17 @@ HOOKEOF
         info "inject-bootup-context hook already configured (all sessions)"
     fi
 
-    # Set compact flag on context compaction (on-compact)
+    # Set compact flag on context compaction (on-compact).
+    # Detect it by command, not by matcher: any other SessionStart entry on matcher
+    # "compact" (e.g. the inject-bootup-context entry below) used to satisfy a
+    # matcher-only check, so on-compact was silently skipped (issue #2285).
+    # matcher="" + the script's own source=="compact" self-gate, as in the top-level
+    # block and Migration 88: matcher="compact" fires unreliably (issue #1947).
     chmod +x "$INSTALL_DIR/hooks/on-compact.py" 2>/dev/null || true
-    if ! jq -e '.hooks.SessionStart[]? | select(.matcher == "compact")' "$_settings" > /dev/null 2>&1; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("on-compact"))' "$_settings" > /dev/null 2>&1; then
         _tmp=$(mktemp)
         jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
-            "matcher": "compact",
+            "matcher": "",
             "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/on-compact.py", "timeout": 30}]
         }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
         success "on-compact hook installed"
