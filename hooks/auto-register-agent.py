@@ -289,6 +289,7 @@ def insert_agent_session(
     input_summary: str | None,
     dispatcher_pid: int | None = None,
     task_origin: str = DEFAULT_TASK_ORIGIN,
+    parent_id: str | None = None,
 ) -> None:
     """Insert a 'running' row into agent_sessions.db.
 
@@ -298,6 +299,19 @@ def insert_agent_session(
     The agent IS running at the point this PostToolUse hook fires — the Agent
     tool was just called and the subagent process is live. There is no need for
     a provisional 'starting' state.
+
+    Args:
+        parent_id: The agent_id of the subagent that made this spawn, when the
+            spawn happened from inside a subagent rather than the dispatcher
+            (see `main()` -- derived from `data.get("agent_id")`, which Claude
+            Code injects into PreToolUse/PostToolUse payloads only for
+            subagent sessions; the dispatcher's own payloads never carry it).
+            NULL for a top-level spawn issued directly by the dispatcher.
+            Populating this closes the forensic gap identified in issue #2313:
+            nested spawns previously registered with parent_id always NULL,
+            making parent/child correlation require manual timestamp/
+            description cross-referencing after an incident instead of a
+            simple join.
 
     Raises on DB errors so the caller can log and swallow.
     """
@@ -336,14 +350,18 @@ def insert_agent_session(
             )
         """)
         # Additive migration for DBs created before this hook wrote the
-        # task_origin/pid/dispatcher_pid/pid_captured_at columns (mirrors session_store.py's
-        # _MIGRATION_STMTS pattern). Each ALTER is a no-op on a fresh table that
-        # already has the column from the CREATE TABLE above.
+        # task_origin/pid/dispatcher_pid/pid_captured_at/parent_id columns (mirrors
+        # session_store.py's _MIGRATION_STMTS pattern). Each ALTER is a no-op on a
+        # fresh table that already has the column from the CREATE TABLE above.
+        # parent_id predates this hook's own CREATE TABLE (session_store.py has
+        # always had it), but a legacy pre-hook table may still lack it, so it is
+        # migrated here too rather than assumed present (issue #2313).
         for stmt in (
             "ALTER TABLE agent_sessions ADD COLUMN task_origin TEXT DEFAULT 'user'",
             "ALTER TABLE agent_sessions ADD COLUMN pid INTEGER",
             "ALTER TABLE agent_sessions ADD COLUMN dispatcher_pid INTEGER",
             "ALTER TABLE agent_sessions ADD COLUMN pid_captured_at TEXT",
+            "ALTER TABLE agent_sessions ADD COLUMN parent_id TEXT",
         ):
             try:
                 conn.execute(stmt)
@@ -357,10 +375,10 @@ def insert_agent_session(
             INSERT OR IGNORE INTO agent_sessions
                 (id, task_id, agent_type, description, chat_id, source,
                  status, output_file, input_summary, spawned_at,
-                 dispatcher_pid, pid_captured_at, task_origin)
+                 dispatcher_pid, pid_captured_at, task_origin, parent_id)
             VALUES
                 (?, ?, 'subagent', 'auto-registered by PostToolUse hook', ?, ?,
-                 'running', ?, ?, ?, ?, ?, ?)
+                 'running', ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 agent_id,
@@ -373,6 +391,7 @@ def insert_agent_session(
                 dispatcher_pid,
                 pid_captured_at,
                 task_origin,
+                parent_id,
             ),
         )
         conn.commit()
@@ -494,6 +513,16 @@ def main() -> None:
         tool_response = data.get("tool_response")
         session_id = data.get("session_id", "")
 
+        # The agent_id of the CALLER, when the caller is itself a registered
+        # subagent (issue #2313, root cause #2). Claude Code injects agent_id
+        # into PreToolUse/PostToolUse payloads only for subagent sessions --
+        # the dispatcher's own top-level spawns never carry it (same signal
+        # already relied on by session_role.is_dispatcher_session(),
+        # catchup-gate.py, thinking-heartbeat.py, etc.). When present, this
+        # spawn is a nested spawn made from inside that subagent, and its
+        # value becomes the new row's parent_id below.
+        caller_agent_id = data.get("agent_id") or None
+
         prompt = tool_input.get("prompt", "")
         metadata = extract_metadata(prompt)
         if metadata["task_origin_warning"]:
@@ -504,6 +533,12 @@ def main() -> None:
         if not agent_id:
             # No agent ID in response -- nothing to register
             sys.exit(0)
+
+        if caller_agent_id:
+            _log_failure(
+                f"nested spawn detected: parent={caller_agent_id!r} "
+                f"child={agent_id!r} task_id={metadata['task_id']!r}"
+            )
 
         # Store first 500 chars of the prompt as input_summary so agent-monitor
         # and the dispatcher can reconstruct context if the agent fails.
@@ -520,6 +555,7 @@ def main() -> None:
             output_file=output_file,
             input_summary=input_summary,
             dispatcher_pid=dispatcher_pid,
+            parent_id=caller_agent_id,
             task_origin=metadata["task_origin"],
         )
 
