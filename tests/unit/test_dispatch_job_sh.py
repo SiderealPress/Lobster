@@ -576,6 +576,120 @@ class TestRunJobShDedupGuard:
         assert len(inbox_files) == 2, f"Expected 2 inbox files (other + dispatched), got {len(inbox_files)}"
 
 
+class TestRunJobShSessionStoreDedupGuard:
+    """Dedup guard: job must be skipped if agent_sessions.db already has a
+    running/starting session for this job's task_id (#2313). This is a
+    second, independent guard from the inbox-file check above -- it catches
+    the case where the inbox dispatch message has already been consumed by
+    the dispatcher and a subagent is actively executing, which the inbox
+    check cannot see."""
+
+    def _seed_running_session(self, messages_dir: Path, task_id: str, status: str = "running") -> None:
+        import sqlite3
+
+        db_dir = messages_dir / "config"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_dir / "agent_sessions.db"))
+        conn.execute(
+            """
+            CREATE TABLE agent_sessions (
+                id TEXT PRIMARY KEY, task_id TEXT, agent_type TEXT,
+                description TEXT NOT NULL, chat_id TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'telegram', status TEXT NOT NULL DEFAULT 'running',
+                spawned_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO agent_sessions (id, task_id, description, chat_id, status, spawned_at) "
+            "VALUES ('existing-1', ?, 'existing session', '0', ?, '2026-01-01T00:00:00+00:00')",
+            (task_id, status),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_skips_when_session_already_running_for_job_task_id(self, tmp_path):
+        workspace, messages_dir, config_dir, fake_bin = _setup_workspace(
+            tmp_path, "my-poller", enabled=True
+        )
+        env = _make_env(workspace, config_dir, messages_dir, fake_bin=fake_bin)
+        inbox_dir = messages_dir / "inbox"
+
+        self._seed_running_session(messages_dir, "scheduled-job-my-poller")
+
+        result = subprocess.run(
+            ["bash", str(RUN_JOB), "my-poller"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"Expected exit 0, got {result.returncode}. stderr: {result.stderr}"
+        # No new inbox dispatch should have been written.
+        inbox_files = list(inbox_dir.glob("*.json"))
+        assert len(inbox_files) == 0, f"Expected no dispatch, got {len(inbox_files)}"
+
+    def test_dispatches_when_session_completed(self, tmp_path):
+        """A completed (not running/starting) session must not block a new dispatch."""
+        workspace, messages_dir, config_dir, fake_bin = _setup_workspace(
+            tmp_path, "my-poller", enabled=True
+        )
+        env = _make_env(workspace, config_dir, messages_dir, fake_bin=fake_bin)
+        inbox_dir = messages_dir / "inbox"
+
+        self._seed_running_session(messages_dir, "scheduled-job-my-poller", status="completed")
+
+        result = subprocess.run(
+            ["bash", str(RUN_JOB), "my-poller"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        inbox_files = list(inbox_dir.glob("*.json"))
+        assert len(inbox_files) == 1, f"Expected 1 dispatched message, got {len(inbox_files)}"
+
+    def test_dispatches_when_no_db_exists(self, tmp_path):
+        """No agent_sessions.db at all (fresh install) must not block dispatch."""
+        workspace, messages_dir, config_dir, fake_bin = _setup_workspace(
+            tmp_path, "my-poller", enabled=True
+        )
+        env = _make_env(workspace, config_dir, messages_dir, fake_bin=fake_bin)
+        inbox_dir = messages_dir / "inbox"
+
+        result = subprocess.run(
+            ["bash", str(RUN_JOB), "my-poller"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        inbox_files = list(inbox_dir.glob("*.json"))
+        assert len(inbox_files) == 1
+
+    def test_different_job_task_id_does_not_block(self, tmp_path):
+        workspace, messages_dir, config_dir, fake_bin = _setup_workspace(
+            tmp_path, "my-poller", enabled=True
+        )
+        env = _make_env(workspace, config_dir, messages_dir, fake_bin=fake_bin)
+        inbox_dir = messages_dir / "inbox"
+
+        self._seed_running_session(messages_dir, "scheduled-job-some-other-job")
+
+        result = subprocess.run(
+            ["bash", str(RUN_JOB), "my-poller"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        inbox_files = list(inbox_dir.glob("*.json"))
+        assert len(inbox_files) == 1
+
+
 class TestRunJobShNoClaude:
     """dispatch-job.sh must never invoke claude -p under any condition."""
 

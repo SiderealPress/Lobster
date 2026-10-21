@@ -79,14 +79,21 @@ def _make_hook_input(
     prompt: str = "",
     tool_response: object = None,
     session_id: str = "sess-123",
+    agent_id: str | None = None,
 ) -> dict:
-    return {
+    payload = {
         "hook_event_name": "PostToolUse",
         "session_id": session_id,
         "tool_name": tool_name,
         "tool_input": {"prompt": prompt},
         "tool_response": tool_response,
     }
+    if agent_id is not None:
+        # Claude Code injects agent_id into subagent PostToolUse payloads only
+        # (never for the dispatcher's own top-level spawns) -- see
+        # hooks/session_role.py and hooks/catchup-gate.py for the same signal.
+        payload["agent_id"] = agent_id
+    return payload
 
 
 def _open_db(tmp_path: Path) -> sqlite3.Connection:
@@ -925,3 +932,61 @@ def test_non_helper_type_still_registered(monkeypatch, tmp_path):
     assert _get_row(tmp_path, "agent-fixture-worker-01") is not None
     inflight = tmp_path / "workspace" / "data" / "inflight-work.jsonl"
     assert len(_read_jsonl(inflight)) == 1
+
+
+# ---------------------------------------------------------------------------
+# parent_id population (issue #2313, root cause #2: nested spawns previously
+# always registered with parent_id=NULL, making parent/child correlation
+# require manual forensics instead of a simple join)
+# ---------------------------------------------------------------------------
+
+class TestParentIdPopulation:
+    def test_top_level_spawn_has_null_parent_id(self, tmp_path):
+        """A spawn with no agent_id in hook input (the dispatcher's own
+        top-level Agent call) registers with parent_id=NULL."""
+        hook_input = _make_hook_input(
+            prompt="---\ntask_id: top-level-fixture\nchat_id: 1000001\n---\nDo X.",
+            tool_response={"agentId": "agent-fixture-top-level"},
+            agent_id=None,
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        row = _get_row(tmp_path, "agent-fixture-top-level")
+        assert row is not None
+        assert row["parent_id"] is None
+
+    def test_nested_spawn_records_caller_as_parent_id(self, tmp_path):
+        """A spawn whose hook input carries agent_id (i.e. made from inside
+        an already-registered subagent) registers with that agent_id as
+        parent_id, enabling parent/child correlation after the fact."""
+        hook_input = _make_hook_input(
+            prompt="---\ntask_id: nested-fixture\nchat_id: 1000001\n---\nDo Y.",
+            tool_response={"agentId": "agent-fixture-child"},
+            agent_id="agent-fixture-parent",
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        row = _get_row(tmp_path, "agent-fixture-child")
+        assert row is not None
+        assert row["parent_id"] == "agent-fixture-parent"
+
+    def test_nested_spawn_logged_to_hook_failures_log(self, tmp_path):
+        """Nested spawns are logged for visibility even though they are not
+        blocked -- the dedup hook (PreToolUse) is what blocks true duplicates;
+        this hook only needs to make nesting forensically visible."""
+        hook_input = _make_hook_input(
+            prompt="---\ntask_id: nested-fixture-log\nchat_id: 1000001\n---\nDo Z.",
+            tool_response={"agentId": "agent-fixture-child-log"},
+            agent_id="agent-fixture-parent-log",
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        log_path = tmp_path / "workspace" / "logs" / "hook-failures.log"
+        assert log_path.exists()
+        log_content = log_path.read_text()
+        assert "nested spawn detected" in log_content
+        assert "agent-fixture-parent-log" in log_content
+        assert "agent-fixture-child-log" in log_content

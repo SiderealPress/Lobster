@@ -206,8 +206,11 @@ class TestReconcile:
         canonical = _mod._canonical_critical_hooks(Path("/opt/lobster"))
         new_settings, repaired = reconcile(settings, canonical)
         assert CRITICAL_HOOK_NAME in repaired
-        # Unrelated hooks and top-level keys untouched.
-        assert new_settings["hooks"]["PreToolUse"] == settings["hooks"]["PreToolUse"]
+        # Unrelated hooks and top-level keys untouched. PreToolUse also gains
+        # the prevent-duplicate-agent-spawn canonical hook (issue #2313), so
+        # assert the original unrelated entry is still present rather than
+        # asserting the whole list is byte-identical.
+        assert settings["hooks"]["PreToolUse"][0] in new_settings["hooks"]["PreToolUse"]
         assert new_settings["env"] == {"LOBSTER_DEBUG": "true"}
         # Original PostToolUse entry (context-monitor) still present alongside the new one.
         commands = [
