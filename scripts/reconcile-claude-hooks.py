@@ -140,6 +140,28 @@ def _canonical_critical_hooks(install_dir: Path) -> list[dict]:
             },
         },
         {
+            # issue #2313: pre-spawn dedup gate. Without this hook, a duplicate
+            # Agent/Task spawn for the same task_id/trigger_message_id is only
+            # ever detected AFTER it has already run (auto-register-agent's
+            # PostToolUse bookkeeping, or a human noticing duplicate external
+            # side effects) -- the exact "disappearing"/silent-failure class
+            # this reconciler exists to close, same as auto-register-agent's
+            # own absence being silent until something goes visibly wrong.
+            "name": "prevent-duplicate-agent-spawn",
+            "event": "PreToolUse",
+            "command_match": "prevent-duplicate-agent-spawn",
+            "entry": {
+                "matcher": "Agent",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"python3 {install_dir}/hooks/prevent-duplicate-agent-spawn.py",
+                        "timeout": 5,
+                    }
+                ],
+            },
+        },
+        {
             "name": "require-write-result",
             "event": "SubagentStop",
             "command_match": "require-write-result",
