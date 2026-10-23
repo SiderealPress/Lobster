@@ -150,6 +150,11 @@ class UpdateManager:
             return {"updates_available": False, "local_sha": local_sha}
 
         behind_count = self._git("rev-list", "--count", f"{local_sha}..{remote_sha}").strip()
+        # A local main that is only ahead of origin/main has different SHAs
+        # but nothing to pull: not an update (#2287).
+        if int(behind_count) == 0:
+            return {"updates_available": False, "local_sha": local_sha, "remote_sha": remote_sha}
+
         log = self._git("log", "--oneline", f"{local_sha}..{remote_sha}")
 
         return {
