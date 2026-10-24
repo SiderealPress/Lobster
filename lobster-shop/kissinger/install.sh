@@ -82,10 +82,33 @@ else
     fi
 fi
 
-# Verify binary works
-if "$MCP_BINARY" --help &>/dev/null 2>&1 || true; then
-    success "Binary is executable"
+# Verify the binary can run on this host without executing it (kissinger-mcp
+# has no --version: running it starts the server and opens the database).
+# The bundled binary is x86_64; on other architectures fall back to a locally
+# installed or locally built copy. ELF e_machine is bytes 18-19, little-endian.
+elf_machine() { od -An -t x1 -j 18 -N 2 "$1" 2>/dev/null | tr -d ' \n'; }
+host_elf_machine() {
+    case "$(uname -m)" in
+        x86_64)        echo 3e00 ;;
+        aarch64|arm64) echo b700 ;;
+        *)             echo unknown ;;
+    esac
+}
+if [ "$(elf_machine "$MCP_BINARY")" != "$(host_elf_machine)" ]; then
+    warn "$MCP_BINARY is not built for $(uname -m) (would fail with ENOEXEC)"
+    for candidate in /usr/local/bin/kissinger-mcp "$PROJECT_DIR/target/release/kissinger-mcp"; do
+        if [ -x "$candidate" ] && [ "$(elf_machine "$candidate")" = "$(host_elf_machine)" ]; then
+            MCP_BINARY="$candidate"
+            success "Using $MCP_BINARY instead"
+            break
+        fi
+    done
+    if [ "$(elf_machine "$MCP_BINARY")" != "$(host_elf_machine)" ]; then
+        error "No kissinger-mcp binary for $(uname -m). Build one: cd $PROJECT_DIR && cargo build --release"
+        exit 1
+    fi
 fi
+success "Binary matches host architecture ($(uname -m))"
 
 #===============================================================================
 # Step 3: Create database directory
