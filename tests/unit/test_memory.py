@@ -14,6 +14,7 @@ import json
 import shutil
 import sqlite3
 import tempfile
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -504,6 +505,269 @@ class TestVectorMemory:
         assert "databases" in results[0].content
 
         vec_mem._embedder.embed_one = original_embed
+
+
+# ============================================================================
+# SQLite Resilience Tests (issue #2206 regression)
+# ============================================================================
+#
+# memory.db is shared between VectorMemory and the User Model subsystem,
+# each holding its own independent long-lived connection in WAL mode. A
+# write on one connection can collide with a write held open on another,
+# raising sqlite3.OperationalError("database is locked"). Prior to the
+# fix, this happened with zero retry and silently dropped the event.
+
+
+class TestSqliteResilienceHelpers:
+    """Pure unit tests for the retry/backoff primitives (no DB needed)."""
+
+    def test_is_retryable_lock_error_true_for_locked_db(self):
+        import sqlite3
+        from src.mcp.memory.sqlite_resilience import is_retryable_lock_error
+
+        exc = sqlite3.OperationalError("database is locked")
+        assert is_retryable_lock_error(exc) is True
+
+    def test_is_retryable_lock_error_true_for_locked_table(self):
+        import sqlite3
+        from src.mcp.memory.sqlite_resilience import is_retryable_lock_error
+
+        exc = sqlite3.OperationalError("database table is locked")
+        assert is_retryable_lock_error(exc) is True
+
+    def test_is_retryable_lock_error_false_for_other_operational_errors(self):
+        import sqlite3
+        from src.mcp.memory.sqlite_resilience import is_retryable_lock_error
+
+        exc = sqlite3.OperationalError("no such table: events")
+        assert is_retryable_lock_error(exc) is False
+
+    def test_is_retryable_lock_error_false_for_non_sqlite_errors(self):
+        from src.mcp.memory.sqlite_resilience import is_retryable_lock_error
+
+        assert is_retryable_lock_error(ValueError("not sqlite")) is False
+
+    def test_with_retry_succeeds_after_transient_failures(self):
+        import sqlite3
+        from src.mcp.memory.sqlite_resilience import with_retry
+
+        calls = {"n": 0}
+        sleeps = []
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise sqlite3.OperationalError("database is locked")
+            return "ok"
+
+        result = with_retry(flaky, max_attempts=5, sleep=sleeps.append)
+        assert result == "ok"
+        assert calls["n"] == 3
+        # Two retries happened, so two backoff sleeps were recorded.
+        assert len(sleeps) == 2
+
+    def test_with_retry_raises_after_exhausting_attempts(self):
+        import sqlite3
+        from src.mcp.memory.sqlite_resilience import with_retry
+
+        def always_locked():
+            raise sqlite3.OperationalError("database is locked")
+
+        with pytest.raises(sqlite3.OperationalError):
+            with_retry(always_locked, max_attempts=3, sleep=lambda s: None)
+
+    def test_with_retry_does_not_retry_non_retryable_errors(self):
+        import sqlite3
+        from src.mcp.memory.sqlite_resilience import with_retry
+
+        calls = {"n": 0}
+
+        def bad_sql():
+            calls["n"] += 1
+            raise sqlite3.OperationalError("no such table: events")
+
+        with pytest.raises(sqlite3.OperationalError):
+            with_retry(bad_sql, max_attempts=5, sleep=lambda s: None)
+        # Should fail immediately on the first attempt - no retry loop entered.
+        assert calls["n"] == 1
+
+    def test_write_result_success_and_failure_shapes(self):
+        from src.mcp.memory.sqlite_resilience import WriteResult
+
+        ok = WriteResult.success(42, attempts=2)
+        assert ok.ok is True
+        assert ok.value == 42
+        assert ok.error is None
+
+        err = ValueError("boom")
+        failed = WriteResult.failure(err, attempts=5)
+        assert failed.ok is False
+        assert failed.value is None
+        assert failed.error is err
+
+
+class TestVectorMemoryLockContention:
+    """Reproduces sustained SQLITE_BUSY contention against a real on-disk
+    database (mirroring the User Model subsystem holding an independent
+    write lock on the same memory.db) and proves the fix handles it
+    without silently dropping the event.
+    """
+
+    @pytest.fixture
+    def temp_dir(self):
+        d = tempfile.mkdtemp(prefix="lobster_test_vecmem_lock_")
+        yield Path(d)
+        shutil.rmtree(d, ignore_errors=True)
+
+    @pytest.fixture
+    def vec_mem(self, temp_dir):
+        pytest.importorskip("sqlite_vec", reason="sqlite_vec not installed — skipping VectorMemory tests")
+        pytest.importorskip("fastembed", reason="fastembed not installed — skipping VectorMemory tests")
+        from src.mcp.memory.vector_memory import VectorMemory
+        db_path = temp_dir / "test_memory_lock.db"
+        return VectorMemory(db_path=db_path)
+
+    def _make_event(self, content: str):
+        from src.mcp.memory.provider import MemoryEvent
+        return MemoryEvent(
+            id=None, timestamp=datetime.now(timezone.utc),
+            type="note", source="internal", project=None,
+            content=content,
+        )
+
+    def test_busy_timeout_is_set_on_connection(self, vec_mem):
+        """The connection must configure a busy_timeout so SQLite itself
+        retries internally before ever raising "database is locked"."""
+        row = vec_mem._conn.execute("PRAGMA busy_timeout").fetchone()
+        assert row[0] > 0
+
+    def test_store_survives_concurrent_writer_holding_lock(self, vec_mem, temp_dir):
+        """Simulates the User Model subsystem's independent connection
+        holding the SQLite write lock (BEGIN IMMEDIATE) on the same
+        physical file while VectorMemory.store() is called. Before the
+        fix, this raised sqlite3.OperationalError immediately with no
+        retry and the event was lost. After the fix, VectorMemory's own
+        busy_timeout (set in _init_db) lets SQLite's internal busy
+        handler wait out the lock, so the write succeeds.
+        """
+        db_path = temp_dir / "test_memory_lock.db"
+        release_event = threading.Event()
+        blocker_ready = threading.Event()
+
+        def hold_lock_in_own_thread():
+            # sqlite3 connections are thread-affine: this connection must be
+            # created AND released from the same thread, which is why the
+            # blocker runs in its own thread rather than being shared.
+            blocker = sqlite3.connect(str(db_path), timeout=0)
+            blocker.execute("BEGIN IMMEDIATE")
+            blocker.execute("SELECT 1")  # ensure the write lock is actually held
+            blocker_ready.set()
+            release_event.wait(timeout=5)
+            blocker.commit()
+            blocker.close()
+
+        holder = threading.Thread(target=hold_lock_in_own_thread)
+        holder.start()
+        blocker_ready.wait(timeout=5)
+        try:
+            # Release the lock shortly after VectorMemory starts retrying,
+            # well within its busy_timeout + retry/backoff window.
+            threading.Timer(0.3, release_event.set).start()
+            event = self._make_event("Event written during lock contention")
+            event_id = vec_mem.store(event)
+        finally:
+            holder.join(timeout=5)
+
+        assert event_id >= 1
+        assert event.id == event_id
+        # The event must actually be persisted, not merely return an ID.
+        assert vec_mem.event_count() == 1
+        recent = vec_mem.recent(hours=1)
+        assert any(e.content == "Event written during lock contention" for e in recent)
+
+    def test_try_store_exhausts_retries_and_returns_explicit_failure(self, vec_mem, temp_dir):
+        """When contention is sustained beyond all retries (the blocker
+        never releases the lock within VectorMemory's retry budget),
+        try_store must return an explicit WriteResult(ok=False) - not
+        raise unexpectedly, not silently return a sentinel ID, and not
+        swallow the error. The underlying event must not be left
+        half-written.
+        """
+        db_path = temp_dir / "test_memory_lock.db"
+        blocker_ready = threading.Event()
+        stop_blocking = threading.Event()
+
+        def hold_lock_forever():
+            blocker = sqlite3.connect(str(db_path), timeout=0)
+            blocker.execute("BEGIN IMMEDIATE")
+            blocker.execute("SELECT 1")
+            blocker_ready.set()
+            # Must outlast the full retry budget below: busy_timeout (5s,
+            # set in VectorMemory._init_db) x max_attempts(2) can take up
+            # to ~10s before try_store gives up, plus backoff between
+            # attempts. 30s gives ample headroom so this test deterministically
+            # exercises exhaustion rather than racing a lucky late success.
+            stop_blocking.wait(timeout=30)
+            blocker.rollback()
+            blocker.close()
+
+        holder = threading.Thread(target=hold_lock_forever)
+        holder.start()
+        blocker_ready.wait(timeout=5)
+        try:
+            event = self._make_event("This write should fail loudly, not vanish")
+            # max_attempts=2 keeps this deterministic and fast: the blocker
+            # thread holds the lock for the whole call, so every attempt -
+            # including SQLite's own internal busy_timeout wait - must fail,
+            # proving retries truly exhaust rather than happening to win a race.
+            result = vec_mem.try_store(event, max_attempts=2)
+
+            assert result.ok is False
+            assert isinstance(result.error, sqlite3.OperationalError)
+            assert result.attempts == 2
+            # No row should have been committed for this event.
+            assert vec_mem.event_count() == 0
+
+            # store() (the raising variant) must re-raise rather than swallow.
+            with pytest.raises(sqlite3.OperationalError):
+                vec_mem.store(self._make_event("Also should raise, not vanish"), max_attempts=2)
+        finally:
+            stop_blocking.set()
+            holder.join(timeout=5)
+
+    def test_health_check_reports_healthy_with_recent_write(self, vec_mem):
+        event = self._make_event("Recent write for health check")
+        vec_mem.store(event)
+
+        health = vec_mem.health_check(stale_after_hours=24)
+        assert health["healthy"] is True
+        assert health["event_count"] == 1
+        assert health["last_write"] is not None
+        assert health["reason"] is None
+
+    def test_health_check_reports_unhealthy_when_stale(self, vec_mem):
+        # Insert directly with a stale timestamp to simulate a pipeline
+        # that stopped writing N hours ago (issue #2206's actual symptom).
+        stale_ts = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        vec_mem._conn.execute(
+            """
+            INSERT INTO events (timestamp, type, source, project, content, metadata, consolidated)
+            VALUES (?, 'note', 'internal', NULL, 'Stale event', '{}', 0)
+            """,
+            (stale_ts,),
+        )
+        vec_mem._conn.commit()
+
+        health = vec_mem.health_check(stale_after_hours=24)
+        assert health["healthy"] is False
+        assert health["event_count"] == 1
+        assert "stall" in health["reason"]
+
+    def test_health_check_healthy_when_empty(self, vec_mem):
+        health = vec_mem.health_check()
+        assert health["healthy"] is True
+        assert health["event_count"] == 0
+        assert health["last_write"] is None
 
 
 # ============================================================================
