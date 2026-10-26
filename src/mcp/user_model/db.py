@@ -1229,6 +1229,14 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    # memory.db is shared with VectorMemory (src/mcp/memory/vector_memory.py),
+    # which holds its own independent long-lived connection to the same file.
+    # Without a busy_timeout, this connection's writes can collide with
+    # VectorMemory's and raise "database is locked" immediately with no
+    # internal retry (issue #2206). WAL mode allows concurrent readers but
+    # only one writer at a time, so both sides need a timeout to ride out
+    # short write-lock collisions instead of failing instantly.
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA foreign_keys=ON")
     init_schema(conn)
     return conn
