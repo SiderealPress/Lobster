@@ -1722,13 +1722,20 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         migrated=$((migrated + 1))
     fi
 
-    # Migration 74: Enable and start lobster-transcription.service on existing installs.
-    # Prior to this fix, install.sh installed the service file but never called
-    # systemctl enable, so voice messages accumulated in pending-transcription/ forever.
+    # Migration 74: Generate, enable and start lobster-transcription.service on existing installs.
+    # The service is now generated from a template (like all other Lobster services) to support
+    # different install paths and users. This migration regenerates the service file from the
+    # template and ensures it's enabled and running.
     if systemctl is-system-running >/dev/null 2>&1 || pidof systemd >/dev/null 2>&1; then
-        local transcription_svc="$LOBSTER_DIR/services/lobster-transcription.service"
-        if [ -f "$transcription_svc" ]; then
-            sudo cp "$transcription_svc" /etc/systemd/system/lobster-transcription.service
+        local transcription_template="$LOBSTER_DIR/services/lobster-transcription.service.template"
+        if [ -f "$transcription_template" ]; then
+            # Generate service from template (using same approach as install.sh)
+            _tmpl_generate_from_template "$transcription_template" "/tmp/lobster-transcription.service" || {
+                warn "Failed to generate lobster-transcription.service from template — skipping Migration 74"
+                return 0
+            }
+            sudo cp "/tmp/lobster-transcription.service" /etc/systemd/system/lobster-transcription.service
+            rm -f "/tmp/lobster-transcription.service"
             sudo systemctl daemon-reload 2>/dev/null || true
             if ! systemctl is-enabled --quiet lobster-transcription 2>/dev/null; then
                 sudo systemctl enable lobster-transcription 2>/dev/null || true
@@ -1741,7 +1748,7 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
                 migrated=$((migrated + 1))
             fi
         else
-            substep "WARN: lobster-transcription.service not found at $transcription_svc — skipping"
+            substep "WARN: lobster-transcription.service.template not found at $transcription_template — skipping Migration 74"
         fi
     else
         substep "systemd not running — skipping lobster-transcription.service enable (container?)"
