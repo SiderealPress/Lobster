@@ -140,3 +140,18 @@ def test_reregistering_same_session_is_idempotent(hook, db_path):
 
     assert _running_dispatcher_ids(db_path) == {"same-session"}
     assert _row(db_path, "same-session")["completed_at"] is None
+
+
+def test_retirement_count_is_logged(hook, db_path, capsys):
+    for old in ("old-session-1", "old-session-2"):
+        _insert(db_path, old, "dispatcher", RUNNING_STATUS)
+
+    hook._register_dispatcher_session("new-session", db_path=db_path)
+
+    assert "retired 2 superseded dispatcher row(s)" in capsys.readouterr().err
+
+
+def test_nothing_logged_when_no_rows_retired(hook, db_path, capsys):
+    hook._register_dispatcher_session("new-session", db_path=db_path)
+
+    assert "retired" not in capsys.readouterr().err

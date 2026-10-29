@@ -213,7 +213,13 @@ def _register_dispatcher_session(session_id: str, db_path: Path | None = None) -
         session_store.init_db(path)
         conn = session_store._get_connection(path)
         now = datetime.now(timezone.utc).isoformat()
-        _retire_superseded_dispatcher_rows(conn, session_id, now)
+        retired = _retire_superseded_dispatcher_rows(conn, session_id, now)
+        if retired:
+            print(
+                f"[write-dispatcher-session-id] retired {retired} superseded "
+                f"dispatcher row(s) for new session {session_id}",
+                file=sys.stderr,
+            )
         conn.execute(
             """
             INSERT OR IGNORE INTO agent_sessions
