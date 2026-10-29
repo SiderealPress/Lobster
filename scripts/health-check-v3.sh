@@ -82,6 +82,7 @@ TMUX_SOCKET="lobster"
 TMUX_SESSION="lobster"
 SERVICE_CLAUDE="lobster-claude"
 SERVICE_ROUTER="lobster-router"
+SERVICE_TRANSCRIPTION="lobster-transcription"
 
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
@@ -861,6 +862,27 @@ check_services() {
         *)
             # inactive, unknown, etc. — warn but don't trigger claude restart
             log_warn "Service $SERVICE_ROUTER is in unexpected state: $router_state"
+            ;;
+    esac
+
+    # Check transcription service (non-critical — voice messages queue safely in pending-transcription/)
+    local transcription_state
+    transcription_state=$(systemctl is-active "$SERVICE_TRANSCRIPTION" 2>/dev/null || echo "inactive")
+    case "$transcription_state" in
+        active)
+            # OK — transcription worker is running normally
+            ;;
+        activating|reloading|deactivating)
+            # Transient state during restart — not alarming
+            log_info "Service $SERVICE_TRANSCRIPTION is in transient state: $transcription_state"
+            ;;
+        failed)
+            log_warn "Service $SERVICE_TRANSCRIPTION has failed (non-critical, will auto-restart)"
+            # Don't set failed=1; transcription failures don't trigger a full restart
+            ;;
+        *)
+            # inactive, unknown, etc. — log for visibility but don't alarm
+            log_info "Service $SERVICE_TRANSCRIPTION is in state: $transcription_state"
             ;;
     esac
 
