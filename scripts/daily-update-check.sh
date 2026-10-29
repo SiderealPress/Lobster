@@ -26,11 +26,12 @@ cd "$LOBSTER_DIR"
 if [ -d "$LOBSTER_DIR/.git" ]; then
     git fetch origin main --quiet
 
-    LOCAL=$(git rev-parse HEAD)
-    REMOTE=$(git rev-parse origin/main)
+    # Gate on the behind count, not SHA inequality: a local main that is
+    # ahead of origin/main (e.g. after an upgrade merge) has different SHAs
+    # but nothing to pull, and must not get a "0 commits behind" notice (#2287).
+    BEHIND=$(git rev-list --count HEAD..origin/main)
 
-    if [ "$LOCAL" != "$REMOTE" ]; then
-        BEHIND=$(git rev-list --count "$LOCAL..$REMOTE")
+    if [ "$BEHIND" -gt 0 ]; then
         TIMESTAMP=$(date +%s%3N)
         _json_build_message \
             --arg id "${TIMESTAMP}_update_available" \

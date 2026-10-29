@@ -83,6 +83,33 @@ class TestCheckForUpdates:
         assert result["commits_behind"] == 3
         assert len(result["commit_log"]) == 3
 
+    @patch("src.mcp.update_manager.subprocess.run")
+    def test_local_ahead_is_not_an_update(self, mock_run, tmp_path):
+        """Local main ahead of origin/main: SHAs differ, 0 behind (#2287)."""
+        local_sha = "aaa1111"
+        remote_sha = "bbb2222"
+
+        def side_effect(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            if "rev-parse" in cmd and "HEAD" in cmd:
+                result.stdout = local_sha + "\n"
+            elif "rev-parse" in cmd and "origin/main" in cmd:
+                result.stdout = remote_sha + "\n"
+            elif "rev-list" in cmd and "--count" in cmd:
+                result.stdout = "0\n"
+            else:
+                result.stdout = ""
+            return result
+
+        mock_run.side_effect = side_effect
+        mgr = self._make_manager(tmp_path)
+        result = mgr.check_for_updates()
+
+        assert result["updates_available"] is False
+        assert "commits_behind" not in result
+
 
 class TestGenerateChangelog:
     """Tests for generate_changelog method."""
