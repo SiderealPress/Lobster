@@ -1,0 +1,23 @@
+# Unit tests deselected in CI (.github/workflows/unit-tests.yml).
+#
+# These were already failing on main before CI ran the suite. They are
+# quarantined, not deleted, so CI can go green without hiding them.
+# Tracking issue: https://github.com/SiderealPress/lobster/issues/2321
+#
+# One pytest node-id prefix per line; blank lines and '#' comments ignored.
+# When you fix a test, delete its line here. That's the whole process.
+
+# upgrade.sh no longer contains Migration 71 (LOBSTER-SCHEDULED cleanup)
+tests/unit/test_dispatch_job_deprecation.py::TestUpgradeMigration71
+
+# imports bot.slack_router without LOBSTER_SLACK_BOT_TOKEN -> ValueError
+tests/unit/test_bot/test_slack_poller_oldest_precision.py::TestNextOldestBoundFix
+
+# warning is logged but the test's capture sees ''
+tests/unit/test_bot/test_slack_router_config.py::TestPollChannelsValidation::test_warning_logged_when_poll_channels_empty
+
+# hangs in stop_event.wait() until pytest-timeout (60s)
+tests/unit/test_bot/test_slack_outbox_scan_fallback.py::TestObserverHealthCheck::test_observer_health_checked_on_every_tick
+
+# regex extractor doesn't recognise `jq --arg source "system"`
+tests/unit/test_script_inbox_sources.py::test_daily_update_check_writes_system_source

@@ -497,7 +497,7 @@ class TestRunScanDecisions:
         remote_sha, local_sha = self._push_a_change(git_repo, "jane.doe@realcompany.com, 555-867-5309\n")
         stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
         finding = {"file": "a.txt", "line": 1, "category": "pii", "snippet": "jane.doe@realcompany.com", "reason": "real contact"}
-        code, message = run(stdin, {_ENV_MODE: "block"}, str(git_repo), call_scanner_fn=_fake_scanner_returning("block", [finding]))
+        code, message = run(stdin, {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"}, str(git_repo), call_scanner_fn=_fake_scanner_returning("block", [finding]))
         assert code == 1
         assert "BLOCKED" in message
         assert "a.txt" in message
@@ -506,7 +506,7 @@ class TestRunScanDecisions:
         remote_sha, local_sha = self._push_a_change(git_repo, "jane.doe@realcompany.com\n")
         stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
         finding = {"file": "a.txt", "line": 1, "category": "pii", "snippet": "x", "reason": "y"}
-        code, message = run(stdin, {_ENV_MODE: "warn"}, str(git_repo), call_scanner_fn=_fake_scanner_returning("block", [finding]))
+        code, message = run(stdin, {_ENV_MODE: "warn", "ANTHROPIC_API_KEY": "sk-test-fake"}, str(git_repo), call_scanner_fn=_fake_scanner_returning("block", [finding]))
         assert code == 0
         assert "WARNING" in message
         assert "BLOCKED" in message  # the underlying finding text is still shown
@@ -514,7 +514,7 @@ class TestRunScanDecisions:
     def test_allow_verdict_produces_no_message(self, git_repo):
         remote_sha, local_sha = self._push_a_change(git_repo, "just some ordinary code change\n")
         stdin = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
-        code, message = run(stdin, {_ENV_MODE: "block"}, str(git_repo), call_scanner_fn=_fake_scanner_returning("allow"))
+        code, message = run(stdin, {_ENV_MODE: "block", "ANTHROPIC_API_KEY": "sk-test-fake"}, str(git_repo), call_scanner_fn=_fake_scanner_returning("allow"))
         assert code == 0
         assert message == ""
 
