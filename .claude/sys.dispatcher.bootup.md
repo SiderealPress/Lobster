@@ -433,10 +433,16 @@ Scheduled reminders arrive from `scheduled-tasks/dispatch-job.sh` (user-created 
            continue  # ← explicit early exit — prompt construction never reached
 
        # Generic dispatch: user-created job (non-destructive name)
-       prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\ntask_origin: scheduled\n---\n\n{task_content}"
+       # trigger_message_id = this scheduled_reminder's own message_id (issue #2313):
+       # lets the prevent-duplicate-agent-spawn PreToolUse hook catch a second
+       # spawn caused by the SAME inbound dispatch even if it ends up under a
+       # different task_id for any reason -- belt-and-suspenders alongside the
+       # deterministic task_id match (task_id is already unique per job name,
+       # which independently catches the common case).
+       prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\ntask_origin: scheduled\ntrigger_message_id: {message_id}\n---\n\n{task_content}"
    else:
        # Unknown reminder with no task content
-       prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\ntask_origin: scheduled\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
+       prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\ntask_origin: scheduled\ntrigger_message_id: {message_id}\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
    subagent_type = msg.get("subagent_type", "lobster-generalist")
    Spawn subagent: subagent_type: subagent_type, prompt: prompt
 5. mark_processed(message_id)

@@ -385,6 +385,20 @@ HOOKEOF
         info "require-task-id-in-prompt hook already configured"
     fi
 
+    # Block a duplicate Agent/Task spawn when another agent is already
+    # running/starting for the same task_id or trigger_message_id (issue #2313)
+    chmod +x "$INSTALL_DIR/hooks/prevent-duplicate-agent-spawn.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("prevent-duplicate-agent-spawn"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Agent",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/prevent-duplicate-agent-spawn.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "prevent-duplicate-agent-spawn hook installed"
+    else
+        info "prevent-duplicate-agent-spawn hook already configured"
+    fi
+
     # Warn on inline WebFetch/WebSearch (dispatcher-inline-tool-guard)
     chmod +x "$INSTALL_DIR/hooks/dispatcher-inline-tool-guard.py" 2>/dev/null || true
     if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("dispatcher-inline-tool-guard"))' "$_settings" > /dev/null 2>&1; then
@@ -2032,6 +2046,31 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     fi
 else
     info "Skipping require-task-id-in-prompt hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code PreToolUse hook to block a duplicate Agent/Task spawn when
+# another agent is already 'running'/'starting' for the same task_id or
+# trigger_message_id (issue #2313: pre-spawn dedup gate, closes the gap where
+# auto-register-agent.py only records bookkeeping *after* a spawn already
+# happened, too late to prevent duplicate external side effects).
+chmod +x "$INSTALL_DIR/hooks/prevent-duplicate-agent-spawn.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("prevent-duplicate-agent-spawn"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Agent",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/prevent-duplicate-agent-spawn.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "prevent-duplicate-agent-spawn hook installed"
+    else
+        info "prevent-duplicate-agent-spawn hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping prevent-duplicate-agent-spawn hook (settings.json not yet created)"
 fi
 
 # Set up Claude Code PreToolUse hook to warn when WebFetch/WebSearch are called inline

@@ -138,6 +138,52 @@ if ls "${INBOX_DIR}"/*_scheduled_"${JOB_NAME}".json 2>/dev/null | head -1 | grep
     exit 0
 fi
 
+# --- Dedup guard: skip if a subagent is already running for this job (#2313) ---
+# The inbox-file check above only catches a pending *dispatch message* that
+# hasn't been picked up yet -- it says nothing once the dispatcher has
+# consumed that message and spawned a subagent (confirmed live: the
+# x-bookmarks incident had exactly one inbox dispatch but three downstream
+# Agent spawns, so this check alone would not have caught it; this is a
+# second, independent guard against the case where cron fires again while a
+# previous run's subagent is still executing). Queries agent_sessions.db
+# directly rather than going through the dispatcher LLM, since this script
+# runs from cron with no LLM in the loop. Soft-fails open on any error (DB
+# missing, python/sqlite3 unavailable, unexpected schema) -- this guard is
+# defense-in-depth on top of the inbox check above and the
+# prevent-duplicate-agent-spawn PreToolUse hook on the dispatcher side; it
+# must never be the single point of failure that blocks a legitimate run.
+EXPECTED_TASK_ID="scheduled-job-${JOB_NAME}"
+if command -v python3 &> /dev/null; then
+    RUNNING_COUNT=$(python3 - "$EXPECTED_TASK_ID" <<'PYEOF' 2>/dev/null || echo "0"
+import os
+import sqlite3
+import sys
+
+task_id = sys.argv[1]
+db_path = os.path.join(
+    os.environ.get("LOBSTER_MESSAGES", os.path.expanduser("~/messages")),
+    "config", "agent_sessions.db",
+)
+if not os.path.exists(db_path):
+    print(0)
+    sys.exit(0)
+try:
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT COUNT(*) FROM agent_sessions WHERE task_id = ? AND status IN ('running', 'starting')",
+        (task_id,),
+    ).fetchone()
+    print(row[0] if row else 0)
+except Exception:
+    print(0)
+PYEOF
+)
+    if [ "$RUNNING_COUNT" -gt 0 ] 2>/dev/null; then
+        echo "[$START_ISO] Job '$JOB_NAME' already has a running session (task_id=$EXPECTED_TASK_ID) — skipping" | tee -a "$LOG_FILE"
+        exit 0
+    fi
+fi
+
 # --- Write scheduled_reminder to inbox ---
 # Embed the task content so the dispatcher can pass it directly to the
 # subagent without needing to read the file on the main thread.
