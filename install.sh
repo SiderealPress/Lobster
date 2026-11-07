@@ -385,6 +385,21 @@ HOOKEOF
         info "require-task-id-in-prompt hook already configured"
     fi
 
+    # Block wait_for_messages/check_inbox for subagent sessions (issue #2323:
+    # a finished subagent looping on wait_for_messages became a second rogue
+    # dispatcher loop)
+    chmod +x "$INSTALL_DIR/hooks/block-subagent-dispatcher-tools.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("block-subagent-dispatcher-tools"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "mcp__lobster-inbox__wait_for_messages|mcp__lobster-inbox__check_inbox",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/block-subagent-dispatcher-tools.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "block-subagent-dispatcher-tools hook installed"
+    else
+        info "block-subagent-dispatcher-tools hook already configured"
+    fi
+
     # Warn on inline WebFetch/WebSearch (dispatcher-inline-tool-guard)
     chmod +x "$INSTALL_DIR/hooks/dispatcher-inline-tool-guard.py" 2>/dev/null || true
     if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("dispatcher-inline-tool-guard"))' "$_settings" > /dev/null 2>&1; then
@@ -2032,6 +2047,28 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     fi
 else
     info "Skipping require-task-id-in-prompt hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code PreToolUse hook to block wait_for_messages/check_inbox for
+# subagent sessions (issue #2323)
+chmod +x "$INSTALL_DIR/hooks/block-subagent-dispatcher-tools.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("block-subagent-dispatcher-tools"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "mcp__lobster-inbox__wait_for_messages|mcp__lobster-inbox__check_inbox",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/block-subagent-dispatcher-tools.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "block-subagent-dispatcher-tools hook installed"
+    else
+        info "block-subagent-dispatcher-tools hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping block-subagent-dispatcher-tools hook (settings.json not yet created)"
 fi
 
 # Set up Claude Code PreToolUse hook to warn when WebFetch/WebSearch are called inline
