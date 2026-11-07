@@ -3802,10 +3802,18 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
     # any session that is not the designated dispatcher session.
     #
     # In HTTP transport mode: use per-session tagging (_is_main_http_session).
-    #   - A session becomes the dispatcher by calling wait_for_messages (Option A),
-    #     session_start(agent_type="dispatcher") (Option B), or any guarded tool
-    #     when no dispatcher is currently tagged (Option C — restart recovery).
-    #   - All other sessions are blocked from guarded tools.
+    #   - A session becomes the dispatcher by calling wait_for_messages (Option A)
+    #     while no dispatcher is currently tagged, session_start(agent_type=
+    #     "dispatcher") (Option B), or any guarded tool when no dispatcher is
+    #     currently tagged (Option C — restart recovery).
+    #   - Once a dispatcher is tagged, EVERY guarded tool — including
+    #     wait_for_messages — is blocked for any other session. wait_for_messages
+    #     is deliberately NOT exempted from this check (see issue #2323): a
+    #     subagent that calls wait_for_messages after finishing its own task must
+    #     be rejected exactly like any other non-dispatcher session calling
+    #     send_reply or check_inbox, instead of silently being allowed through to
+    #     re-tag itself as the dispatcher and run a second rogue message loop
+    #     against the shared inbox.
     #
     # Option C — restart recovery (no-dispatcher-tagged auto-tag):
     #   When _dispatcher_session_id is None the MCP server has just restarted and
@@ -3820,11 +3828,14 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
     #   (_is_main_session).  This path is unchanged.
     if name in _SESSION_GUARDED_TOOLS:
         if _http_session_manager is not None:
-            # HTTP mode: per-session guard.  wait_for_messages is always exempted
-            # (Option A tagging).  When no dispatcher is tagged yet (Option C),
-            # auto-tag the calling session before the guard check so the call
-            # proceeds — this handles the restart race where the dispatcher calls
-            # send_reply or check_inbox before its first WFM/session_start fires.
+            # HTTP mode: per-session guard.  When no dispatcher is tagged yet
+            # (Option C / Option A bootstrap), auto-tag the calling session
+            # before the guard check so the call proceeds — this handles both
+            # the restart race (dispatcher calls send_reply/check_inbox before
+            # its first WFM/session_start fires) and the normal case of the
+            # dispatcher's very first wait_for_messages call tagging itself.
+            # Once a dispatcher IS tagged, this auto-tag path is never taken
+            # again for any tool, including wait_for_messages (issue #2323).
             if _dispatcher_session_id is None:
                 session_id = _get_current_http_session_id()
                 if session_id is not None:
@@ -3833,7 +3844,7 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
                         f"on '{name}' call — session {session_id!r}"
                     )
                     _tag_dispatcher_session(session_id)
-            if name != "wait_for_messages" and not _is_main_http_session():
+            if not _is_main_http_session():
                 log.warning(
                     f"Session guard blocked '{name}' — HTTP session "
                     f"{_get_current_http_session_id()!r} is not the dispatcher "
@@ -4176,24 +4187,37 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     hibernate_on_timeout = args.get("hibernate_on_timeout", False)
 
     # Option A: tag-on-first-use.  wait_for_messages is dispatcher-exclusive,
-    # so the session calling it is the dispatcher.  Tag it now so subsequent
-    # guarded tool calls from this same session are allowed.
-    if _http_session_manager is not None:
+    # so the first session to call it (while none is tagged yet) is treated as
+    # the dispatcher.  By the time this handler runs, _dispatch_tool's session
+    # guard has already rejected any call from a session that is not the
+    # tagged dispatcher once one exists — see issue #2323, where this re-tag
+    # used to run unconditionally on every call and let a finished subagent
+    # silently steal the dispatcher role by calling wait_for_messages again.
+    # Guarding on `_dispatcher_session_id is None` here keeps this a true
+    # bootstrap-only path, matching the Option C auto-tag in _dispatch_tool.
+    if _http_session_manager is not None and _dispatcher_session_id is None:
         session_id = _get_current_http_session_id()
         if session_id is not None:
             _tag_dispatcher_session(session_id)
 
     # Phase 2: SQLite dispatcher lock — enforce single-dispatcher structurally.
-    # Take (or replace stale) dispatcher lock so a second concurrent loop cannot
-    # run alongside this one.  We check whether the existing lock holder is still
-    # an active HTTP session before taking over; if it is, we log a warning and
-    # proceed anyway (fail-open) rather than blocking the dispatcher entirely.
+    # Take the dispatcher lock so a second concurrent loop cannot run alongside
+    # this one. Mirrors the _dispatch_tool guard above: only take/replace the
+    # lock when it is unheld or stale (held by a session that is no longer
+    # active). A lock actively held by a different live session is left alone
+    # — _dispatch_tool's session guard already rejected this call in that case
+    # (dispatcher tagging and the lock agree), so reaching here with an
+    # actively-held foreign lock would mean the two mechanisms disagree, which
+    # should never happen; failing to take over is the safe default either way
+    # (see issue #2323 — blind takeover here is what let a finished subagent's
+    # wait_for_messages call silently dispossess the real dispatcher).
     if _http_session_manager is not None:
         session_id = _get_current_http_session_id()
         if session_id is not None:
             existing_lock = _claims_db.get_dispatcher_lock()
-            if existing_lock is not None and existing_lock["session_id"] != session_id:
-                # Another session holds the lock — check whether it is still active.
+            if existing_lock is None or existing_lock["session_id"] == session_id:
+                _claims_db.force_replace_dispatcher_lock(session_id)
+            else:
                 old_session_id = existing_lock["session_id"]
                 lock_holder_active = False
                 try:
@@ -4202,17 +4226,18 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
                     lock_holder_active = False
                 if lock_holder_active:
                     log.warning(
-                        f"[dispatcher-lock] Second dispatcher detected: "
-                        f"session {session_id!r} called wait_for_messages while "
-                        f"{old_session_id!r} holds an active lock. "
-                        "Allowing takeover to unblock the main loop."
+                        f"[dispatcher-lock] Session {session_id!r} called "
+                        f"wait_for_messages while {old_session_id!r} holds an "
+                        "active dispatcher lock. Not taking over — the session "
+                        "guard should have already blocked this call; leaving "
+                        "the existing lock in place (issue #2323)."
                     )
                 else:
                     log.info(
                         f"[dispatcher-lock] Stale lock from {old_session_id!r} — "
                         f"taking over for {session_id!r}"
                     )
-            _claims_db.force_replace_dispatcher_lock(session_id)
+                    _claims_db.force_replace_dispatcher_lock(session_id)
 
     # Touch heartbeat at start - signals Claude is alive and waiting for messages
     touch_heartbeat()
