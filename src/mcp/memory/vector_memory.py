@@ -21,6 +21,7 @@ from pathlib import Path
 import psutil
 
 from .provider import MemoryEvent
+from .sqlite_resilience import WriteResult, busy_timeout_ms, with_retry
 from path_guard import assert_not_in_git_repo
 
 log = logging.getLogger("lobster-memory")
@@ -125,6 +126,13 @@ class VectorMemory:
         conn = sqlite3.connect(str(self._db_path))
         conn.row_factory = sqlite3.Row
 
+        # memory.db is shared with the User Model subsystem (src/mcp/user_model/db.py),
+        # which holds its own independent long-lived connection to the same file in
+        # WAL mode. Without a busy_timeout, a write here that races a User Model write
+        # raises "database is locked" immediately with zero internal retry (issue #2206).
+        conn.execute("PRAGMA journal_mode=WAL")
+        busy_timeout_ms(conn)
+
         # Load sqlite-vec extension
         conn.enable_load_extension(True)
         import sqlite_vec
@@ -204,41 +212,102 @@ class VectorMemory:
         conn.commit()
         return conn
 
-    def store(self, event: MemoryEvent) -> int:
+    def store(self, event: MemoryEvent, *, max_attempts: int | None = None) -> int:
         """Store an event with its embedding.
 
         Returns the assigned event ID.
+
+        Transient SQLite lock contention (another connection to the shared
+        memory.db holding the write lock - see User Model subsystem) is
+        retried with exponential backoff. If retries are exhausted, the
+        in-flight transaction is explicitly rolled back and the original
+        exception is re-raised - this never silently drops the event.
+
+        Args:
+            max_attempts: Override the default retry budget (mainly for
+                tests that need to force exhaustion deterministically).
         """
-        # Generate embedding
+        result = self.try_store(event, max_attempts=max_attempts)
+        if not result.ok:
+            raise result.error
+        return result.value
+
+    def try_store(
+        self, event: MemoryEvent, *, max_attempts: int | None = None
+    ) -> WriteResult[int]:
+        """Store an event, returning an explicit WriteResult instead of
+        raising on failure.
+
+        Prefer this over `store()` when the caller wants to handle a
+        failed write without a try/except (e.g. to log-and-continue in a
+        batch import) while still being forced to check `result.ok` rather
+        than accidentally treating a sentinel return value as success.
+
+        Args:
+            max_attempts: Override the default retry budget (mainly for
+                tests that need to force exhaustion deterministically).
+        """
+        # Generate embedding once; retries only need to re-run the SQL,
+        # not re-embed the content.
         embedding = self._embedder.embed_one(event.content)
-
-        cursor = self._conn.execute(
-            """
-            INSERT INTO events (timestamp, type, source, project, content, metadata, consolidated)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event.timestamp.isoformat(),
-                event.type,
-                event.source,
-                event.project,
-                event.content,
-                json.dumps(event.metadata),
-                1 if event.consolidated else 0,
-            ),
-        )
-        event_id = cursor.lastrowid
-
-        # Store embedding vector
         vec_blob = _serialize_vector(embedding)
-        self._conn.execute(
-            "INSERT INTO events_vec(rowid, embedding) VALUES (?, ?)",
-            (event_id, vec_blob),
-        )
 
-        self._conn.commit()
+        attempts_used = 0
+
+        def _write() -> int:
+            nonlocal attempts_used
+            attempts_used += 1
+            try:
+                cursor = self._conn.execute(
+                    """
+                    INSERT INTO events (timestamp, type, source, project, content, metadata, consolidated)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.timestamp.isoformat(),
+                        event.type,
+                        event.source,
+                        event.project,
+                        event.content,
+                        json.dumps(event.metadata),
+                        1 if event.consolidated else 0,
+                    ),
+                )
+                event_id = cursor.lastrowid
+
+                self._conn.execute(
+                    "INSERT INTO events_vec(rowid, embedding) VALUES (?, ?)",
+                    (event_id, vec_blob),
+                )
+
+                self._conn.commit()
+                return event_id
+            except sqlite3.OperationalError:
+                # Explicit rollback so a failed write never leaves the
+                # connection wedged mid-transaction for the next caller
+                # (including a subsequent retry attempt).
+                self._conn.rollback()
+                raise
+
+        def _on_retry(attempt: int, exc: BaseException) -> None:
+            log.warning(
+                f"VectorMemory.store retrying after lock contention "
+                f"(attempt {attempt}): {exc}"
+            )
+
+        retry_kwargs = {} if max_attempts is None else {"max_attempts": max_attempts}
+        try:
+            event_id = with_retry(_write, on_retry=_on_retry, **retry_kwargs)
+        except sqlite3.OperationalError as exc:
+            log.error(
+                f"VectorMemory.store failed after {attempts_used} attempt(s), "
+                f"event dropped: {exc}",
+                exc_info=True,
+            )
+            return WriteResult.failure(exc, attempts=attempts_used)
+
         event.id = event_id
-        return event_id
+        return WriteResult.success(event_id, attempts=attempts_used)
 
     def search(self, query: str, limit: int = 10, project: str = None) -> list[MemoryEvent]:
         """Hybrid search: 70% cosine similarity + 30% BM25 keyword.
@@ -480,6 +549,69 @@ class VectorMemory:
         """Return total number of stored events."""
         row = self._conn.execute("SELECT COUNT(*) as cnt FROM events").fetchone()
         return row["cnt"]
+
+    def last_write_timestamp(self) -> "datetime | None":
+        """Return the timestamp of the most recently stored event, or None
+        if the events table is empty.
+        """
+        row = self._conn.execute(
+            "SELECT timestamp FROM events ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row is None or row["timestamp"] is None:
+            return None
+        return datetime.fromisoformat(row["timestamp"])
+
+    def health_check(self, stale_after_hours: int = 24) -> dict:
+        """Lightweight staleness check nightly consolidation (or any
+        caller) can use to detect the write-pipeline-stalled class of
+        failure (issue #2206) immediately, instead of a human noticing
+        `memory_recent` returning empty days later.
+
+        This is defense in depth on top of the retry/backoff in
+        `store()`/`try_store()`: even with retries, a sufficiently
+        pathological contention pattern (or an unrelated future bug)
+        could still stop writes from landing. This function makes that
+        condition mechanically detectable rather than silent.
+
+        Returns a dict:
+            {
+                "healthy": bool,
+                "event_count": int,
+                "last_write": str | None,   # ISO timestamp, or None if empty
+                "stale_hours": float | None, # hours since last write
+                "reason": str | None,        # explanation when unhealthy
+            }
+        """
+        count = self.event_count()
+        last_write = self.last_write_timestamp()
+
+        if last_write is None:
+            # An empty table is only unhealthy if events were expected -
+            # callers with domain knowledge (e.g. "we've been running for
+            # weeks") should treat event_count == 0 as unhealthy themselves.
+            return {
+                "healthy": count == 0,
+                "event_count": count,
+                "last_write": None,
+                "stale_hours": None,
+                "reason": None if count == 0 else "event_count > 0 but no readable last_write timestamp",
+            }
+
+        now = datetime.now(timezone.utc)
+        if last_write.tzinfo is None:
+            last_write = last_write.replace(tzinfo=timezone.utc)
+        stale_hours = (now - last_write).total_seconds() / 3600.0
+
+        healthy = stale_hours <= stale_after_hours
+        return {
+            "healthy": healthy,
+            "event_count": count,
+            "last_write": last_write.isoformat(),
+            "stale_hours": round(stale_hours, 2),
+            "reason": None
+            if healthy
+            else f"no writes in {stale_hours:.1f}h (threshold {stale_after_hours}h) - possible write-pipeline stall",
+        }
 
     @staticmethod
     def _row_to_event(row: sqlite3.Row) -> MemoryEvent:
