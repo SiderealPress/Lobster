@@ -279,3 +279,44 @@ not. Normalise divergent representations in one shared coercion helper
 (`_coerce_reply_to`) rather than with an `isinstance` check at each call site.
 
 **History:** issue #2269.
+
+---
+
+## One-Time Migration Left on the Hot Path (runs on every open)
+
+**Pattern:** A migration that only ever needs to run once per database — drop and rebuild an
+index after a definition change, backfill a column, re-tokenize — is placed in the open/startup
+path with no "already done" check, because at the time it was written it did need to run on the
+next start. Errors are swallowed ("index may not exist yet"), so nothing ever complains.
+
+**Why it matters:** The code is correct on the day it ships and stays silently expensive forever.
+Every process that opens the store pays the full cost, including short-lived ones (CLI commands,
+MCP server starts, health checks, cron jobs). The damage is invisible from inside the process and
+shows up somewhere else entirely — here as disk usage.
+
+**Concrete instance (2026-10-24, kissinger):** `KissingerStore::open()` ran `::fts drop` on all
+three full-text indices and then recreated them, on every open, since commit f38b08b (2026-04-09,
+"drop/recreate indices on startup for filter changes"). On the ~9,200-entity production graph
+that was 60–240 MB of SQLite WAL per `kissinger` CLI invocation or `kissinger-mcp` start
+(measured against a copy of the database). The long-running `kissinger-api` never truncated the
+WAL, and SQLite cannot restart a WAL while any reader holds a read-mark, so six months of
+"one-time" rebuilds accumulated into a 31 GB `graph.db-wal` and a 99%-full root disk. The API
+process itself had written only ~100 MB in 42 days (`/proc/<pid>/io`); the writer was the CLI.
+
+**What to look for:**
+- `migrate_*`, `rebuild_*`, `reindex_*`, `drop ... create` in an `open()`/`new()`/startup path
+  with no version marker, feature check, or "exists and matches" guard.
+- Comments like "pick up X changes on startup" or "ignore errors — may not exist yet".
+- Short-lived processes (CLI, cron) sharing a store with a long-lived server: the short-lived
+  ones pay startup cost per invocation and their writes land in the server's WAL.
+
+**Fix pattern:** Record a definition version in the store (`kissinger_meta.fts_schema_version`)
+and make the rebuild conditional on `stored != current` via a pure decision function; bump the
+constant when the definition changes. Write a test that reopens an unchanged database and asserts
+the WAL grew by less than a small named bound. Separately, give long-running servers an explicit
+periodic `PRAGMA wal_checkpoint(TRUNCATE)` with a busy timeout — SQLite's automatic checkpoint
+never truncates and is starved by overlapping readers (kissinger PR #16, #17).
+
+**History:** kissinger f38b08b (introduced) → kissinger PR #16 (periodic checkpoint, bounded the
+symptom) → kissinger PR #17 (conditional rebuild, removed the cause); lobster `scripts/wal-checkpoint.sh`
+daily cron and `scripts/disk-usage-alert.sh` hourly timer as safety nets.

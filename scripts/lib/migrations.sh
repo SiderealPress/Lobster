@@ -2680,6 +2680,30 @@ M88_PYEOF
         fi
     fi
 
+    # Migration 104: Disk guardrails after the 2026-10-24 incident (root disk 99%
+    # full from a 31 GB kissinger graph.db-wal). Two system-level cron entries:
+    #  - LOBSTER-WAL-CHECKPOINT: daily PRAGMA wal_checkpoint(TRUNCATE) on
+    #    ~/.kissinger/graph.db. Safety net behind the app-level fix (kissinger
+    #    PR #16/#17); only added when that database exists on this install.
+    #  - LOBSTER-DISK-ALERT: hourly root-disk check; Telegram alert to the admin
+    #    chat above 85% with the top-5 consumers (6 h cooldown).
+    local WAL_CHECKPOINT_MARKER="# LOBSTER-WAL-CHECKPOINT"
+    if [ -f "$HOME/.kissinger/graph.db" ] && ! crontab -l 2>/dev/null | grep -q "$WAL_CHECKPOINT_MARKER"; then
+        chmod +x "$LOBSTER_DIR/scripts/wal-checkpoint.sh" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$WAL_CHECKPOINT_MARKER" \
+            "0 2 * * * $LOBSTER_DIR/scripts/wal-checkpoint.sh $WAL_CHECKPOINT_MARKER"
+        substep "Migration 104: added daily kissinger WAL checkpoint cron entry (02:00 UTC)"
+        migrated=$((migrated + 1))
+    fi
+    local DISK_ALERT_MARKER="# LOBSTER-DISK-ALERT"
+    if ! crontab -l 2>/dev/null | grep -q "$DISK_ALERT_MARKER"; then
+        chmod +x "$LOBSTER_DIR/scripts/disk-usage-alert.sh" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$DISK_ALERT_MARKER" \
+            "7 * * * * $LOBSTER_DIR/scripts/disk-usage-alert.sh $DISK_ALERT_MARKER"
+        substep "Migration 104: added hourly disk-usage alert cron entry (threshold 85%)"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
