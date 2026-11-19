@@ -35,6 +35,11 @@ from slack_sdk.errors import SlackApiError
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).parent.parent))
 from channels.outbox import OutboxFileHandler, OutboxWatcher, drain_outbox  # noqa: E402
+from bot.slack_placeholders import (  # noqa: E402
+    DEFAULT_PLACEHOLDER_MAX_AGE_SECONDS,
+    Placeholder,
+    PlaceholderStore,
+)
 
 # ---------------------------------------------------------------------------
 # Slack Connector ingress logger (logs every event to JSONL before LLM routing)
@@ -100,6 +105,15 @@ SLACK_TYPING_INDICATOR: bool = _TYPING_INDICATOR_RAW not in ("false", "0", "no",
 
 # The placeholder text posted before the real reply is ready.
 SLACK_TYPING_PLACEHOLDER = "..."
+
+# Placeholders that wait longer than this for a reply are deleted as orphans
+# (see src/bot/slack_placeholders.py).
+SLACK_PLACEHOLDER_MAX_AGE_SECONDS: float = float(
+    os.environ.get(
+        "LOBSTER_SLACK_PLACEHOLDER_MAX_AGE_SECONDS",
+        str(DEFAULT_PLACEHOLDER_MAX_AGE_SECONDS),
+    )
+)
 
 
 def parse_channel_remap(raw: str) -> dict:
@@ -206,16 +220,17 @@ channel_cache = {}
 # ---------------------------------------------------------------------------
 # Inbound typing-indicator state
 #
-# Maps channel_id → deque of (slack_ts, placeholder_ts) pairs in arrival order.
-# Populated when a "..." placeholder is posted on message arrival; consumed by
-# _send_slack_reply when the real reply is ready.
-#
-# Using a deque-per-channel FIFO so that if multiple messages arrive in quick
-# succession for the same channel, each real reply consumes the correct
-# placeholder in arrival order.
+# Pending "..." placeholders, one per inbound message, persisted to disk so a
+# restart neither forgets them nor leaves them stranded in Slack.  A reply
+# fills the NEWEST placeholder in its channel/thread and deletes the older
+# ones from the same burst (the dispatcher often answers several messages with
+# one reply).  The previous per-channel FIFO popped the OLDEST placeholder, so
+# a single batched reply left N-1 orphans and every later reply edited a stale
+# message (issue #2325).  Matching rules live in src/bot/slack_placeholders.py.
 # ---------------------------------------------------------------------------
-_placeholder_queue: dict[str, collections.deque] = collections.defaultdict(
-    collections.deque
+_PLACEHOLDER_STATE_FILE = _WORKSPACE / "data" / "slack-placeholders.json"
+_placeholders = PlaceholderStore(
+    _PLACEHOLDER_STATE_FILE, max_age=SLACK_PLACEHOLDER_MAX_AGE_SECONDS
 )
 
 
@@ -332,7 +347,7 @@ def _post_typing_placeholder(channel_id: str, thread_ts: str | None, slack_ts: s
         resp = user_client.chat_postMessage(**kwargs)
         placeholder_ts = resp.get("ts")
         if placeholder_ts:
-            _placeholder_queue[channel_id].append((slack_ts, placeholder_ts))
+            _placeholders.register(channel_id, thread_ts, slack_ts, placeholder_ts)
             log.info(
                 "Posted inbound typing placeholder to %s (ts=%s)",
                 channel_id, placeholder_ts,
@@ -598,17 +613,19 @@ def _send_slack_reply(reply: dict) -> bool:
     uses a two-phase inbound-then-outbound typing pattern:
 
     Phase 1 (inbound): When a message arrives, ``_post_typing_placeholder``
-    immediately posts "..." to Slack and enqueues ``(slack_ts, placeholder_ts)``
-    in ``_placeholder_queue[channel_id]``.  The user sees the message appear
-    the moment their message lands.
+    immediately posts "..." to Slack and registers it in ``_placeholders``.
+    The user sees the message appear the moment their message lands.
 
-    Phase 2 (outbound, here): When the real reply is ready, pop the oldest
-    placeholder for the channel and call ``chat.update`` with the real text.
+    Phase 2 (outbound, here): When the real reply is ready, claim the NEWEST
+    pending placeholder for the reply's channel/thread (or the one for
+    ``reply_to_slack_ts`` when the reply names its target), ``chat.update`` it
+    with the real text, and delete the older placeholders that the reply
+    superseded plus any that have expired.
 
-    Fallback: if no pending placeholder exists in the queue (e.g. proactive
-    messages, or placeholder post failed earlier), use the legacy
-    ``_send_with_typing_indicator`` path which posts "..." and immediately
-    updates it.  If ``chat.update`` fails, fall back to ``chat_postMessage``.
+    Fallback: if no pending placeholder matches (e.g. proactive messages, or
+    placeholder post failed earlier), the reply is posted as a new message
+    via the legacy ``_send_with_typing_indicator`` path.  If ``chat.update``
+    fails, fall back to ``chat_postMessage``.
     """
     channel_id = reply.get("chat_id", "")
     text = reply.get("text", "")
@@ -621,15 +638,67 @@ def _send_slack_reply(reply: dict) -> bool:
         channel_id = remapped
 
     if SLACK_TYPING_INDICATOR:
-        # Check if an inbound typing placeholder is waiting for this channel.
-        pending = _placeholder_queue.get(channel_id)
-        if pending:
-            _slack_ts, placeholder_ts = pending.popleft()
-            return _update_placeholder(channel_id, placeholder_ts, text, thread_ts)
-        # No pending inbound placeholder (proactive message or placeholder post
-        # failed earlier) — fall back to the legacy post-then-update pattern.
-        return _send_with_typing_indicator(channel_id, text, thread_ts)
+        resolution = _placeholders.claim(
+            channel_id, thread_ts, reply_to_slack_ts=reply.get("reply_to_slack_ts")
+        )
+        if resolution.target is not None:
+            sent = _fill_placeholder(resolution.target, text, thread_ts)
+        else:
+            # No pending inbound placeholder (proactive message, placeholder
+            # expired, or its post failed) — post the reply as a new message.
+            sent = _send_with_typing_indicator(channel_id, text, thread_ts)
+        # Clean up after delivering so the user sees the answer first.
+        _delete_placeholders(resolution.stale)
+        return sent
     return _send_direct(channel_id, text, thread_ts)
+
+
+def _fill_placeholder(target: Placeholder, text: str, thread_ts: str | None) -> bool:
+    """Put the reply where *target* is, honouring an explicit reply thread.
+
+    ``chat.update`` cannot move a message between threads, so if the reply
+    asks for a thread the placeholder is not in, delete the placeholder and
+    post the reply in the requested thread instead.
+    """
+    if thread_ts and thread_ts != target.thread_ts:
+        _delete_placeholders((target,))
+        return _send_direct(target.channel_id, text, thread_ts)
+    return _update_placeholder(target.channel_id, target.placeholder_ts, text, thread_ts)
+
+
+def _delete_placeholders(placeholders) -> None:
+    """Best-effort ``chat.delete`` of orphaned "..." placeholders.
+
+    Failures (already deleted, permissions) are logged and ignored — they
+    must never block delivery of a real reply.
+    """
+    for p in placeholders:
+        try:
+            user_client.chat_delete(channel=p.channel_id, ts=p.placeholder_ts)
+            log.info(
+                "Deleted orphaned placeholder ts=%s in %s (inbound ts=%s)",
+                p.placeholder_ts, p.channel_id, p.slack_ts,
+            )
+        except SlackApiError as exc:
+            log.warning(
+                "Could not delete placeholder ts=%s in %s: %s",
+                p.placeholder_ts, p.channel_id, exc,
+            )
+
+
+def _sweep_expired_placeholders() -> None:
+    """Delete placeholders that waited longer than the max age for a reply."""
+    _delete_placeholders(_placeholders.sweep())
+
+
+def _restore_placeholders_on_startup() -> None:
+    """Reload persisted placeholders; delete any that expired while down."""
+    expired = _placeholders.load()
+    _delete_placeholders(expired)
+    log.info(
+        "Placeholder state restored: %d pending, %d expired deleted",
+        len(_placeholders.pending()), len(expired),
+    )
 
 
 def _build_post_kwargs(channel_id: str, text: str, thread_ts: str | None) -> dict:
@@ -1437,6 +1506,10 @@ def _scan_outbox_periodically(stop_event: Event, observer: object) -> None:
                 "Fallback scanner is compensating; consider restarting the service."
             )
         drain_outbox(OUTBOX_DIR, source="slack", send_fn=_send_slack_reply, log=log)
+        try:
+            _sweep_expired_placeholders()
+        except Exception as exc:  # never let cleanup kill the scanner thread
+            log.warning("Placeholder sweep failed: %s", exc)
         stop_event.wait(timeout=OUTBOX_SCAN_INTERVAL)
     log.info("Outbox fallback scanner stopped")
 
@@ -1464,6 +1537,9 @@ def main():
         log.info("Channel-conversation mode active for: %s", CHANNEL_CONVERSATIONS)
     else:
         log.info("No LOBSTER_SLACK_CHANNEL_CONVERSATIONS configured — channel-conversation mode inactive")
+
+    # Restore pending typing placeholders before any reply can be delivered.
+    _restore_placeholders_on_startup()
 
     # Set up outbox watcher
     observer = Observer()
