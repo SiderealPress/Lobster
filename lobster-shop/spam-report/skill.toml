@@ -1,0 +1,55 @@
+# =============================================================================
+# Lobster Skill Manifest — spam-report
+# =============================================================================
+
+[skill]
+name = "spam-report"
+version = "1.0.0"
+description = "Report a spam call/text to the FTC and FCC via browser automation, draft the carrier 7726 forward, and log it for repeat-offender tracking"
+author = "Lobster"
+category = "tool"
+
+[activation]
+mode = "triggered"
+triggers = [
+    "/reportspam",
+    "/spamlog",
+]
+context_patterns = [
+    "when user says 'report this as spam'",
+    "when user says 'file a spam complaint'",
+    "when user says 'report this number'",
+    "when user says 'file a complaint about this call/text'",
+    "when user forwards or describes a spam call or text and asks it be reported",
+    "when user asks if a number has been reported before",
+]
+
+[layering]
+priority = 60
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/reportspam", "/spamlog"]
+
+[compatibility]
+enhances = ["camofox-browser"]
+conflicts = []
+
+[required_config]
+tracking_log = "~/messages/config/spam_reports.yaml"
+
+[permissions]
+camofox = true
+send_reply = true
+read_config = true
+write_config = true
+
+[dependencies]
+pip = ["pyyaml"]
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
